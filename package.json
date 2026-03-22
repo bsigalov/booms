@@ -1,0 +1,12 @@
+{
+  "name": "oref-alerts-bot",
+  "version": "1.0.0",
+  "description": "Oref alerts Telegram bot",
+  "type": "module",
+  "scripts": {
+    "start": "node oref-alerts.mjs"
+  },
+  "dependencies": {
+    "staticmaps": "^1.13.1"
+  }
+}
