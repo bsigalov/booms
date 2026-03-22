@@ -244,9 +244,17 @@ async function geocode(place) {
   return null;
 }
 
-// --- Risk analysis for Rehovot ---
-const HOME_COORD = [34.8113, 31.8928]; // רחובות, ההולנדית
-const HOME_NAME = "רחובות";
+// --- Advanced Risk Analysis Engine ---
+const HOME_COORD = JSON.parse(process.env.HOME_COORD || "[34.8113, 31.8928]");
+const HOME_NAME = process.env.HOME_NAME || "רחובות";
+const BOOM_RADIUS_KM = 20;
+const DEBRIS_REACH_KM = 20;
+
+// Load correlation index (rebuilt periodically)
+let correlationIndex = { regionCorrelation: {}, impactGivenAlert: { pImpact: 0.18 }, debrisGivenAlert: { pDebris: 0.30 } };
+try {
+  correlationIndex = JSON.parse(readFileSync(new URL("./correlation-index.json", import.meta.url), "utf8"));
+} catch {}
 
 function haversineKm(coord1, coord2) {
   const toRad = (d) => (d * Math.PI) / 180;
@@ -282,80 +290,292 @@ function bearing(from, to) {
   return "צפון-מערב";
 }
 
-function analyzeRisk(alertCoords) {
-  if (alertCoords.length === 0) return null;
+// --- PCA-Based Ellipse Fitting ---
 
-  // Centroid
+function projectToLocalKm(coords) {
+  const n = coords.length;
   const centroid = [
-    alertCoords.reduce((s, c) => s + c[0], 0) / alertCoords.length,
-    alertCoords.reduce((s, c) => s + c[1], 0) / alertCoords.length,
+    coords.reduce((s, c) => s + c[0], 0) / n,
+    coords.reduce((s, c) => s + c[1], 0) / n,
   ];
+  const K_LAT = 111.32;
+  const K_LNG = 111.32 * Math.cos(centroid[1] * Math.PI / 180);
+  const projected = coords.map(([lng, lat]) => [
+    (lng - centroid[0]) * K_LNG,
+    (lat - centroid[1]) * K_LAT,
+  ]);
+  return { centroid, projected, K_LAT, K_LNG };
+}
 
-  // Distance from home to centroid
-  const distToCenter = haversineKm(HOME_COORD, centroid);
-
-  // Spread: average distance from centroid to alert points
-  const distances = alertCoords.map((c) => haversineKm(centroid, c));
-  const spread = distances.reduce((s, d) => s + d, 0) / distances.length;
-  const maxSpread = Math.max(...distances);
-
-  // Closest alert point to home
-  const closestDist = Math.min(...alertCoords.map((c) => haversineKm(HOME_COORD, c)));
-
-  // Direction
-  const dir = bearing(HOME_COORD, centroid);
-
-  // Risk scoring
-  let level, emoji, explanation;
-
-  if (closestDist < 5) {
-    level = "גבוה מאוד";
-    emoji = "🔴";
-    explanation = `${HOME_NAME} נמצאת בתוך אזור ההתרעה!`;
-  } else if (closestDist < 15) {
-    level = "גבוה";
-    emoji = "🔴";
-    explanation = `נקודת ההתרעה הקרובה ביותר במרחק ${Math.round(closestDist)} ק״מ בלבד`;
-  } else if (closestDist < 30) {
-    level = "בינוני";
-    emoji = "🟠";
-    explanation = spread < 20
-      ? "התרעה מרוכזת קרובה — ייתכן שתתרחב"
-      : "ההתרעה מפוזרת ומתקרבת לאזור";
-  } else if (closestDist < 60) {
-    level = "נמוך";
-    emoji = "🟡";
-    explanation = spread > 40
-      ? "התרעה רחבה — ייתכנו התרעות בהמשך"
-      : "ההתרעה רחוקה יחסית מהאזור";
-  } else {
-    level = "מזערי";
-    emoji = "🟢";
-    explanation = "ההתרעה רחוקה מהאזור";
+function fitEllipse(coords) {
+  if (coords.length < 3) {
+    const { centroid } = projectToLocalKm(coords);
+    return { centroid, semiMajor: 5, semiMinor: 5, azimuthDeg: 0, eccentricity: 0 };
   }
 
+  const { centroid, projected, K_LNG, K_LAT } = projectToLocalKm(coords);
+  const n = projected.length;
+
+  // 2x2 covariance matrix
+  let sxx = 0, syy = 0, sxy = 0;
+  for (const [x, y] of projected) {
+    sxx += x * x;
+    syy += y * y;
+    sxy += x * y;
+  }
+  sxx /= n; syy /= n; sxy /= n;
+
+  // Eigenvalue decomposition of 2x2 symmetric matrix
+  const trace = sxx + syy;
+  const det = sxx * syy - sxy * sxy;
+  const disc = Math.sqrt(Math.max(0, trace * trace / 4 - det));
+  const lambda1 = trace / 2 + disc; // larger eigenvalue
+  const lambda2 = Math.max(0.01, trace / 2 - disc); // smaller eigenvalue
+
+  // Semi-axes (2σ covers ~95% of points)
+  const semiMajor = 2 * Math.sqrt(lambda1);
+  const semiMinor = 2 * Math.sqrt(lambda2);
+
+  // Eigenvector for larger eigenvalue → azimuth direction
+  let azimuthRad;
+  if (Math.abs(sxy) > 0.001) {
+    azimuthRad = Math.atan2(lambda1 - sxx, sxy);
+  } else {
+    azimuthRad = sxx >= syy ? 0 : Math.PI / 2;
+  }
+  const azimuthDeg = ((azimuthRad * 180 / Math.PI) + 360) % 360;
+
+  const eccentricity = Math.sqrt(1 - (semiMinor * semiMinor) / (semiMajor * semiMajor));
+
+  return { centroid, semiMajor, semiMinor, azimuthDeg, eccentricity, K_LNG, K_LAT, azimuthRad };
+}
+
+// --- Position-in-Ellipse Classification ---
+
+function classifyHomePosition(ellipse, homeCoord) {
+  const K_LNG = ellipse.K_LNG || 94.92;
+  const K_LAT = ellipse.K_LAT || 111.32;
+  const dx = (homeCoord[0] - ellipse.centroid[0]) * K_LNG;
+  const dy = (homeCoord[1] - ellipse.centroid[1]) * K_LAT;
+
+  // Rotate to ellipse frame
+  const cosA = Math.cos(-ellipse.azimuthRad || 0);
+  const sinA = Math.sin(-ellipse.azimuthRad || 0);
+  const u = dx * cosA - dy * sinA; // along major axis
+  const v = dx * sinA + dy * cosA; // along minor axis
+
+  // Normalize by semi-axes
+  const a = Math.max(ellipse.semiMajor, 1);
+  const b = Math.max(ellipse.semiMinor, 1);
+  const nu = u / a;
+  const nv = v / b;
+  const d = nu * nu + nv * nv; // <1 inside, >1 outside
+
+  let positionType;
+  if (d < 1.0 && nu > 0.3) positionType = "END";
+  else if (d < 1.0 && nu < -0.3) positionType = "START";
+  else if (d < 1.0) positionType = "CENTER";
+  else if (d < 2.25) positionType = "NEAR"; // within 1.5x ellipse
+  else positionType = "FAR";
+
   return {
-    distToCenter: Math.round(distToCenter),
-    closestDist: Math.round(closestDist),
-    spread: Math.round(spread),
-    dir,
-    level,
-    emoji,
-    explanation,
+    isInside: d < 1.0,
+    normalizedDistance: Math.sqrt(d),
+    positionType,
+    alongAxis: nu, // negative=start, positive=end
   };
 }
 
-function formatRiskMessage(alertCoords) {
-  const risk = analyzeRisk(alertCoords);
+// --- Expansion Tracking ---
+
+let alertTimeline = []; // [{timestamp, coords}]
+
+function trackExpansion(currentCoords) {
+  const now = Date.now();
+  alertTimeline.push({ timestamp: now, coords: currentCoords });
+  // Keep last 5 minutes
+  alertTimeline = alertTimeline.filter(e => now - e.timestamp < 300000);
+
+  if (alertTimeline.length < 2) {
+    return { expandingTowardHome: false, velocity: 0, eta: Infinity };
+  }
+
+  const first = alertTimeline[0];
+  const last = alertTimeline[alertTimeline.length - 1];
+  const dt = (last.timestamp - first.timestamp) / 60000; // minutes
+  if (dt < 0.1) return { expandingTowardHome: false, velocity: 0, eta: Infinity };
+
+  const c1 = [
+    first.coords.reduce((s, c) => s + c[0], 0) / first.coords.length,
+    first.coords.reduce((s, c) => s + c[1], 0) / first.coords.length,
+  ];
+  const c2 = [
+    last.coords.reduce((s, c) => s + c[0], 0) / last.coords.length,
+    last.coords.reduce((s, c) => s + c[1], 0) / last.coords.length,
+  ];
+
+  const expansionDist = haversineKm(c1, c2);
+  const velocity = expansionDist / dt; // km/min
+
+  // Dot product of expansion vector and home direction vector
+  const K = 100; // rough scale factor
+  const expVec = [(c2[0] - c1[0]) * K, (c2[1] - c1[1]) * K];
+  const homeVec = [(HOME_COORD[0] - c1[0]) * K, (HOME_COORD[1] - c1[1]) * K];
+  const dot = expVec[0] * homeVec[0] + expVec[1] * homeVec[1];
+  const expandingTowardHome = dot > 0;
+
+  const distToHome = haversineKm(c2, HOME_COORD);
+  const eta = velocity > 0.1 ? distToHome / velocity : Infinity;
+
+  return { expandingTowardHome, velocity: Math.round(velocity * 10) / 10, eta: Math.round(eta) };
+}
+
+// --- Four Probability Functions ---
+
+function clamp(v, min, max) { return Math.min(max, Math.max(min, v)); }
+
+function calculatePAlert(alertRegions, alertSettlements, ellipse, homePosition, expansion) {
+  // Rule 1: Already alerted
+  for (const s of alertSettlements) {
+    if (s.includes(HOME_NAME) || HOME_NAME.includes(s)) return 1.0;
+  }
+  // Check home region
+  const homeRegion = REGION_MAP[HOME_NAME];
+  if (homeRegion && alertRegions.has(homeRegion)) return 0.95;
+
+  // Factor A: Region co-occurrence (40%)
+  let pRegion = 0;
+  for (const region of alertRegions) {
+    const corr = correlationIndex.regionCorrelation?.[region];
+    if (corr && corr.probability > pRegion) pRegion = corr.probability;
+  }
+
+  // Factor B: Ellipse proximity (30%)
+  const posFactors = { END: 0.9, START: 0.85, CENTER: 0.95, NEAR: 0.4, FAR: 0 };
+  let pEllipse = posFactors[homePosition.positionType] ?? 0;
+  if (homePosition.positionType === "FAR") {
+    pEllipse = Math.max(0, 0.2 - homePosition.normalizedDistance * 0.05);
+  }
+
+  // Factor C: Expansion direction (30%)
+  let pExpansion = 0.1;
+  if (expansion.expandingTowardHome) {
+    pExpansion = clamp(0.3 + expansion.velocity * 0.1, 0, 0.8);
+  } else if (expansion.velocity > 0.5) {
+    pExpansion = Math.max(0.05, 0.2 - expansion.velocity * 0.05);
+  }
+
+  return clamp(0.4 * pRegion + 0.3 * pEllipse + 0.3 * pExpansion, 0, 1);
+}
+
+function calculatePImpact(pAlert, ellipse, homePosition) {
+  if (pAlert < 0.1) return pAlert * 0.001;
+
+  const baseRate = correlationIndex.impactGivenAlert?.pImpact ?? 0.18;
+
+  const posFactors = { END: 1.5, CENTER: 1.0, START: 0.3, NEAR: 0.15, FAR: 0.02 };
+  const positionFactor = posFactors[homePosition.positionType] ?? 0.02;
+
+  // Small alert zone = precise missile = higher local risk
+  const area = Math.PI * ellipse.semiMajor * ellipse.semiMinor;
+  const sizeFactor = area < 500 ? 1.3 : area < 2000 ? 1.0 : 0.7;
+
+  return clamp(pAlert * baseRate * positionFactor * sizeFactor, 0, 1);
+}
+
+function calculatePDebris(pAlert, ellipse, homePosition, closestDist) {
+  const baseRate = correlationIndex.debrisGivenAlert?.pDebris ?? 0.30;
+
+  const posFactors = { START: 1.8, CENTER: 1.2, END: 0.6, NEAR: 0.8, FAR: 0 };
+  let positionFactor = posFactors[homePosition.positionType] ?? 0;
+  if (homePosition.positionType === "FAR" && closestDist < DEBRIS_REACH_KM) {
+    positionFactor = 0.4;
+  }
+
+  // Large alert zone = high-altitude interception = wider debris
+  const area = Math.PI * ellipse.semiMajor * ellipse.semiMinor;
+  const altitudeFactor = area > 2000 ? 1.5 : area > 500 ? 1.0 : 0.6;
+
+  // Debris can reach outside alert zone
+  const proximityBoost = closestDist < DEBRIS_REACH_KM
+    ? (1 - closestDist / DEBRIS_REACH_KM) * 0.3
+    : 0;
+
+  return clamp(pAlert * baseRate * positionFactor * altitudeFactor + proximityBoost, 0, 1);
+}
+
+function calculatePBoom(alertCoords, pImpact, pDebris) {
+  const nearbyCount = alertCoords.filter(c => haversineKm(c, HOME_COORD) < BOOM_RADIUS_KM).length;
+  const nearbyRatio = nearbyCount / Math.max(alertCoords.length, 1);
+
+  // Interceptions are very likely (~90% success rate)
+  const pInterceptionNearby = nearbyRatio * 0.9;
+
+  let pBoom = 1 - (1 - pInterceptionNearby) * (1 - pImpact) * (1 - pDebris);
+  if (nearbyRatio > 0.5) pBoom = Math.max(pBoom, 0.95);
+
+  return clamp(pBoom, 0, 1);
+}
+
+// --- Combined Risk Analysis ---
+
+function analyzeRisk(alertCoords, alertRegions, alertSettlements) {
+  if (alertCoords.length === 0) return null;
+
+  const ellipse = fitEllipse(alertCoords);
+  const homePosition = classifyHomePosition(ellipse, HOME_COORD);
+  const expansion = trackExpansion(alertCoords);
+  const closestDist = Math.min(...alertCoords.map(c => haversineKm(HOME_COORD, c)));
+  const dir = bearing(HOME_COORD, ellipse.centroid);
+
+  const regions = alertRegions instanceof Set ? alertRegions : new Set(alertRegions || []);
+  const settlements = alertSettlements || [];
+
+  const pAlert = calculatePAlert(regions, settlements, ellipse, homePosition, expansion);
+  const pImpact = calculatePImpact(pAlert, ellipse, homePosition);
+  const pDebris = calculatePDebris(pAlert, ellipse, homePosition, closestDist);
+  const pBoom = calculatePBoom(alertCoords, pImpact, pDebris);
+
+  return {
+    closestDist: Math.round(closestDist),
+    dir,
+    ellipse: {
+      azimuth: Math.round(ellipse.azimuthDeg),
+      eccentricity: Math.round(ellipse.eccentricity * 100) / 100,
+      area: Math.round(Math.PI * ellipse.semiMajor * ellipse.semiMinor),
+    },
+    homePosition: homePosition.positionType,
+    expansion,
+    probabilities: {
+      alert: Math.round(pAlert * 100),
+      impact: Math.round(pImpact * 100),
+      debris: Math.round(pDebris * 100),
+      boom: Math.round(pBoom * 100),
+    },
+  };
+}
+
+function formatRiskMessage(alertCoords, alertRegions, alertSettlements) {
+  const risk = analyzeRisk(alertCoords, alertRegions, alertSettlements);
   if (!risk) return "";
+
+  const p = risk.probabilities;
+  const pEmoji = (v) => v >= 70 ? "🔴" : v >= 40 ? "🟠" : v >= 15 ? "🟡" : "🟢";
+
+  let expansionNote = "";
+  if (risk.expansion.expandingTowardHome && risk.expansion.velocity > 0.5) {
+    expansionNote = `\n⚡ התרעות מתרחבות לכיוונך (${risk.expansion.eta} דק׳)`;
+  }
 
   return (
     `\n\n🏠 <b>ניתוח סיכון ל${HOME_NAME}:</b>\n` +
-    `📏 מרחק מנקודה קרובה: ${risk.closestDist} ק״מ\n` +
-    `🧭 כיוון: ${risk.dir}\n` +
-    `📐 פיזור ההתרעה: ${risk.spread} ק״מ\n` +
-    `${risk.emoji} <b>רמת סיכון: ${risk.level}</b>\n` +
-    `💡 ${risk.explanation}`
+    `📏 ${risk.closestDist} ק״מ | 🧭 ${risk.dir} | 📐 ${risk.ellipse.area} קמ״ר\n\n` +
+    `📊 <b>הסתברויות:</b>\n` +
+    `${pEmoji(p.alert)} אזעקה: ${p.alert}%\n` +
+    `${pEmoji(p.impact)} נפילת טיל: ${p.impact}%\n` +
+    `${pEmoji(p.debris)} נפילת רסיס: ${p.debris}%\n` +
+    `${pEmoji(p.boom)} בומים: ${p.boom}%` +
+    expansionNote
   );
 }
 
@@ -536,7 +756,16 @@ async function fetchAlerts() {
         // Resolve coordinates once, reuse for map + risk
         const alertCoords = await resolveCoords(alert.data);
 
-        const riskMsg = formatRiskMessage(alertCoords);
+        // Extract regions from alert data
+        const alertRegions = new Set();
+        for (const area of alert.data) {
+          if (REGION_MAP[area]) alertRegions.add(REGION_MAP[area]);
+          for (const [key, region] of Object.entries(REGION_MAP)) {
+            if (area.includes(key)) { alertRegions.add(region); break; }
+          }
+        }
+
+        const riskMsg = formatRiskMessage(alertCoords, alertRegions, alert.data);
 
         const msg =
           `🚨 <b>${alert.title}</b>\n` +
@@ -593,7 +822,14 @@ async function sendTestAlert() {
   const time = new Date().toLocaleTimeString("he-IL");
 
   const alertCoords = await resolveCoords(scenario.areas);
-  const riskMsg = formatRiskMessage(alertCoords);
+  const alertRegions = new Set();
+  for (const area of scenario.areas) {
+    if (REGION_MAP[area]) alertRegions.add(REGION_MAP[area]);
+    for (const [key, region] of Object.entries(REGION_MAP)) {
+      if (area.includes(key)) { alertRegions.add(region); break; }
+    }
+  }
+  const riskMsg = formatRiskMessage(alertCoords, alertRegions, scenario.areas);
 
   const msg =
     `🧪 <b>[בדיקה] ${scenario.title}</b>\n` +
