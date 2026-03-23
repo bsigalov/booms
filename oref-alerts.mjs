@@ -16,17 +16,20 @@ const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 
 let lastAlertId = "";
 let lastMapMessageId = null; // for editing map instead of resending
-let lastTextMessageId = null; // for editing text message
-let eventPhase = null; // null → "early_warning" → "alert" → null
+let lastTextMessageId = null;
+let eventPhase = null; // null | "early_warning" | "alert" | "waiting" | "ended"
 let eventStartTime = null;
 let eventStartTimeStr = null;
 let eventTitle = "";
-let eventDesc = "";
+let eventType = ""; // alert.cat — for event grouping
 let eventSettlements = new Set();
 let eventHistory = []; // [{time, text}]
-let feedbackLog = []; // user feedback on alerts
-let simActive = false; // simulation mode
-let simResponse = ""; // current mock alert JSON (empty = no alert)
+let eventProtectionMin = 10; // parsed from desc
+let eventRiskMsg = ""; // cached risk text
+let lastWaveTime = null; // timestamp of most recent alert wave
+let feedbackLog = [];
+let simActive = false;
+let simResponse = "";
 
 // Load feedback log
 const FEEDBACK_PATH = new URL("./feedback-log.json", import.meta.url);
@@ -772,7 +775,68 @@ async function sendTelegramPhoto(filePath, caption, chatId = TELEGRAM_CHANNEL_ID
   }
 }
 
-// Poll alerts with event lifecycle: early_warning → alert → released
+// --- Event lifecycle helpers ---
+
+const BOOM_BUTTONS = { inline_keyboard: [[
+  { text: "💥 בום!", callback_data: "fb_boom" },
+  { text: "💥💥 חזק!", callback_data: "fb_boom_strong" },
+]] };
+
+function parseProtectionMinutes(desc) {
+  const m = desc.match(/(\d+)\s*דקות/);
+  if (m) return parseInt(m[1]);
+  if (desc.includes("דקה וחצי")) return 1.5;
+  if (desc.includes("דקה")) return 1;
+  return 10;
+}
+
+function buildEventMessage() {
+  const now = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
+  const areaSummary = summarizeAreas([...eventSettlements]);
+
+  let header, timeLine;
+  if (eventPhase === "early_warning") {
+    header = `⚠️ <b>התרעה מוקדמת — ${eventTitle}</b>`;
+    timeLine = `⏰ ${eventStartTimeStr}`;
+  } else if (eventPhase === "alert") {
+    header = `🚨 <b>אזעקות מופעלות — ${eventTitle}</b>`;
+    timeLine = `⏰ ${eventStartTimeStr}`;
+  } else if (eventPhase === "waiting") {
+    header = `🟡 <b>המתנה במרחב מוגן — ${eventTitle}</b>`;
+    timeLine = `⏰ ${eventStartTimeStr}`;
+  } else if (eventPhase === "ended") {
+    const sec = Math.round((Date.now() - eventStartTime) / 1000);
+    header = `✅ <b>האירוע הסתיים — ${eventTitle}</b>`;
+    timeLine = `⏰ ${eventStartTimeStr}–${now} (${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")})`;
+  }
+
+  let msg = `${header}\n${timeLine}\n📍 ${areaSummary}`;
+
+  // Risk analysis only during active phases
+  if (eventPhase === "early_warning" || eventPhase === "alert") {
+    msg += eventRiskMsg;
+  }
+
+  // History blockquote (skip for first early_warning — nothing past yet)
+  if (eventHistory.length > 1 || eventPhase !== "early_warning") {
+    const lines = eventHistory.map(h => `${h.time} — ${h.text}`).join("\n");
+    msg += `\n\n<blockquote>📜 היסטוריה:\n${lines}</blockquote>`;
+  }
+
+  return msg;
+}
+
+async function updateEventMessage() {
+  const msg = buildEventMessage();
+  if (lastTextMessageId) {
+    await sendTelegram(msg, TELEGRAM_CHANNEL_ID, { editMessageId: lastTextMessageId, replyMarkup: BOOM_BUTTONS });
+  } else {
+    const result = await sendTelegram(msg, TELEGRAM_CHANNEL_ID, { replyMarkup: BOOM_BUTTONS });
+    if (result?.ok) lastTextMessageId = result.result.message_id;
+  }
+}
+
+// Poll alerts with event lifecycle
 let emptyCount = 0;
 
 async function fetchAlerts() {
@@ -793,53 +857,25 @@ async function fetchAlerts() {
     // No active alert
     if (!text.trim()) {
       emptyCount++;
-      // Event ended: 5+ consecutive empty polls while event is active
-      if (eventPhase && emptyCount >= 5) {
-        const endTime = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
-        const durationSec = Math.round((Date.now() - eventStartTime) / 1000);
-        const durationMin = Math.floor(durationSec / 60);
-        const durationSecR = durationSec % 60;
+      const emptyThreshold = simActive ? 15 : 120; // 2 min (or 15s in sim)
 
-        // If only one alert ever came (still early_warning), it's already in history
-        eventHistory.push({ time: endTime, text: "✅ שחרור" });
+      // early_warning/alert → waiting
+      if ((eventPhase === "early_warning" || eventPhase === "alert") && emptyCount >= emptyThreshold) {
+        const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
+        eventPhase = "waiting";
+        eventHistory.push({ time, text: "🟡 ממתינים במרחב מוגן" });
+        await updateEventMessage();
+      }
 
-        const historyLines = eventHistory.map(h => `${h.time} — ${h.text}`).join("\n");
-        const historyBlock = `\n\n<blockquote>📜 היסטוריה:\n${historyLines}</blockquote>`;
-
-        const endMsg =
-          `✅ <b>שחרור</b>\n` +
-          `⏰ ${eventStartTimeStr}–${endTime} (${durationMin}:${String(durationSecR).padStart(2, "0")})\n` +
-          `🟢 אפשר לצאת מהמרחב המוגן` +
-          historyBlock;
-
-        const endOpts = {
-          replyMarkup: {
-            inline_keyboard: [
-              [
-                { text: "💥 בומים בזמן אמת", callback_data: "fb_boom_realtime" },
-                { text: "💥 בומים (לא RT)", callback_data: "fb_boom_delayed" },
-                { text: "🔇 שקט", callback_data: "fb_boom_no" },
-              ],
-            ],
-          },
-        };
-
-        if (lastTextMessageId) {
-          await sendTelegram(endMsg, TELEGRAM_CHANNEL_ID, { editMessageId: lastTextMessageId, ...endOpts });
-        } else {
-          await sendTelegram(endMsg, TELEGRAM_CHANNEL_ID, endOpts);
+      // waiting → ended (protection time expired)
+      if (eventPhase === "waiting" && lastWaveTime) {
+        const protMin = simActive ? 0.5 : eventProtectionMin;
+        if (Date.now() - lastWaveTime > protMin * 60000) {
+          const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
+          eventPhase = "ended";
+          eventHistory.push({ time, text: "✅ האירוע הסתיים" });
+          await updateEventMessage();
         }
-
-        // Reset state
-        eventPhase = null;
-        eventStartTime = null;
-        eventStartTimeStr = null;
-        eventTitle = "";
-        eventDesc = "";
-        eventSettlements = new Set();
-        eventHistory = [];
-        lastTextMessageId = null;
-        lastMapMessageId = null;
       }
       return;
     }
@@ -853,43 +889,58 @@ async function fetchAlerts() {
         lastAlertId = alert.id;
         const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
 
-        if (eventPhase === null) {
-          // First alert — early warning phase
+        // Different event type while active → end current event, start fresh
+        if (eventPhase && eventPhase !== "ended" && eventType && alert.cat !== eventType) {
+          eventHistory.push({ time, text: "✅ האירוע הסתיים" });
+          eventPhase = "ended";
+          await updateEventMessage();
+          eventPhase = null;
+          lastTextMessageId = null;
+          lastMapMessageId = null;
+        }
+
+        const isNew = eventPhase === null || eventPhase === "ended";
+
+        if (isNew) {
+          // New event — early warning
           eventPhase = "early_warning";
           eventStartTime = Date.now();
           eventStartTimeStr = time;
           eventTitle = alert.title;
-          eventDesc = alert.desc;
+          eventType = alert.cat;
+          eventProtectionMin = parseProtectionMinutes(alert.desc);
           eventSettlements = new Set(alert.data);
           eventHistory = [{ time, text: `⚠️ התרעה מוקדמת: ${summarizeAreas(alert.data)} (${alert.data.length})` }];
+          lastWaveTime = Date.now();
+          lastTextMessageId = null;
+          lastMapMessageId = null;
         } else {
-          // Subsequent alert — transition to alert phase
-          if (eventPhase === "early_warning") {
+          // Continuing event
+          if (eventPhase === "early_warning") eventPhase = "alert";
+          if (eventPhase === "waiting") {
             eventPhase = "alert";
+            eventHistory.push({ time, text: "🚨 אזעקות חודשו" });
           }
 
-          // Track settlement expansion
           const newSettlements = alert.data.filter(s => !eventSettlements.has(s));
           for (const s of alert.data) eventSettlements.add(s);
+          lastWaveTime = Date.now();
+
+          const newProt = parseProtectionMinutes(alert.desc);
+          if (newProt > eventProtectionMin) eventProtectionMin = newProt;
 
           if (newSettlements.length > 0) {
-            const expansionList = newSettlements.slice(0, 5).join(", ");
+            const list = newSettlements.slice(0, 5).join(", ");
             const more = newSettlements.length > 5 ? ` ועוד ${newSettlements.length - 5}` : "";
-            eventHistory.push({ time, text: `🚨 התרחבות: ${expansionList}${more} (${eventSettlements.size} סה"כ)` });
+            eventHistory.push({ time, text: `🚨 התרחבות: ${list}${more} (${eventSettlements.size} סה"כ)` });
           } else {
             eventHistory.push({ time, text: `🚨 אזעקה: ${summarizeAreas(alert.data)}` });
           }
         }
 
-        console.log(`\n[${time}] ${alert.title} [${eventPhase}]`);
-        console.log(`  סוג: ${alert.cat}`);
-        console.log(`  תיאור: ${alert.desc}`);
-        console.log(`  ישובים: ${eventSettlements.size}`);
-
-        // Resolve coordinates for ALL event settlements
+        // Compute & cache risk
         const allAreas = [...eventSettlements];
         const alertCoords = await resolveCoords(allAreas);
-
         const alertRegions = new Set();
         for (const area of allAreas) {
           if (REGION_MAP[area]) alertRegions.add(REGION_MAP[area]);
@@ -897,39 +948,13 @@ async function fetchAlerts() {
             if (area.includes(key)) { alertRegions.add(region); break; }
           }
         }
+        eventRiskMsg = formatRiskMessage(alertCoords, alertRegions, allAreas);
 
-        const riskMsg = formatRiskMessage(alertCoords, alertRegions, allAreas);
-        const areaSummary = summarizeAreas(allAreas);
+        console.log(`\n[${time}] ${alert.title} [${eventPhase}] ${eventSettlements.size} ישובים`);
 
-        // Build message based on phase
-        const header = eventPhase === "early_warning"
-          ? `⚠️ <b>התרעה מוקדמת — ${eventTitle}</b>`
-          : `🚨 <b>${eventTitle}</b>`;
+        await updateEventMessage();
 
-        // Show history blockquote only after first update (early_warning has no "past" yet)
-        let historyBlock = "";
-        if (eventPhase !== "early_warning") {
-          const historyLines = eventHistory.map(h => `${h.time} — ${h.text}`).join("\n");
-          historyBlock = `\n\n<blockquote>📜 היסטוריה:\n${historyLines}</blockquote>`;
-        }
-
-        const msg =
-          `${header}\n` +
-          `⏰ ${time}\n` +
-          `📋 ${eventDesc}\n` +
-          `📍 ${areaSummary}` +
-          riskMsg +
-          historyBlock;
-
-        // Send or edit text message
-        if (lastTextMessageId) {
-          await sendTelegram(msg, TELEGRAM_CHANNEL_ID, { editMessageId: lastTextMessageId });
-        } else {
-          const result = await sendTelegram(msg);
-          if (result?.ok) lastTextMessageId = result.result.message_id;
-        }
-
-        // Generate and send/update map (cumulative — all event settlements)
+        // Map
         const mapPath = await generateAlertMap(allAreas, alertCoords);
         if (mapPath) {
           await sendTelegramPhoto(mapPath, `📍 מפת התרעות - ${time} (${allAreas.length} ישובים)`);
@@ -1008,10 +1033,11 @@ function startSimulation() {
     TELEGRAM_CHAT_ID
   );
 
-  // Wave timing: t=0, t=40s, t=80s — alert stays active between waves
-  // Clear at t=170s → release triggers ~t=175s ≈ 3 min
+  // Wave timing: t=0, t=30s, t=60s
+  // Clear at t=80s → waiting after 15s → ended after 30s protection
+  // Total: ~2.5 min
   waves.forEach((waveAreas, i) => {
-    const delay = i * 40000;
+    const delay = i * 30000;
     const timer = setTimeout(() => {
       simResponse = JSON.stringify({
         id: `sim-${Date.now()}`,
@@ -1025,21 +1051,21 @@ function startSimulation() {
     simTimers.push(timer);
   });
 
-  // Clear alert → triggers release detection
+  // Clear alert → triggers waiting → ended
   const clearTimer = setTimeout(() => {
     simResponse = "";
-    console.log("[סימולציה] ניקוי — ממתין לשחרור");
-  }, 170000);
+    console.log("[סימולציה] ניקוי — ממתין לשלבי המתנה וסיום");
+  }, 80000);
   simTimers.push(clearTimer);
 
-  // End simulation after release has had time to process
+  // End simulation after all phases complete
   const endTimer = setTimeout(() => {
     simActive = false;
     simResponse = "";
     simTimers = [];
     console.log("[סימולציה] הסתיימה");
     sendTelegram("🧪 הסימולציה הסתיימה — חזרה למצב אמיתי", TELEGRAM_CHAT_ID);
-  }, 185000);
+  }, 140000);
   simTimers.push(endTimer);
 }
 
@@ -1068,73 +1094,29 @@ async function pollTelegramCommands() {
     for (const update of data.result) {
       lastUpdateId = update.update_id;
 
-      // Handle callback queries (feedback buttons — from channel or private)
+      // Handle boom feedback buttons
       if (update.callback_query) {
         const cb = update.callback_query;
         const cbData = cb.data;
-        const cbChatId = cb.message?.chat?.id?.toString();
-        const cbMsgId = cb.message?.message_id;
 
-        await answerCallback(cb.id, "תודה על המשוב! 🙏");
-        const fbTime = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
+        if (cbData === "fb_boom" || cbData === "fb_boom_strong") {
+          const strong = cbData === "fb_boom_strong";
+          const fbTime = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
 
-        if (cbData === "fb_boom_realtime" || cbData === "fb_boom_delayed" || cbData === "fb_boom_no") {
-          const isRealtime = cbData === "fb_boom_realtime";
-          const noBoom = cbData === "fb_boom_no";
+          await answerCallback(cb.id, `💥 בום נרשם! (${strong ? "חזק" : "רגיל"})`);
 
           feedbackLog.push({
-            type: noBoom ? "no_boom" : "boom",
-            realtime: isRealtime,
-            time: fbTime,
-            timestamp: Date.now(),
+            type: "boom", intensity: strong ? 3 : 1,
+            time: fbTime, timestamp: Date.now(),
           });
-
-          if (noBoom) {
-            writeFileSync(FEEDBACK_PATH, JSON.stringify(feedbackLog, null, 2));
-            // Update the message to show result + remove buttons
-            await sendTelegram(
-              cb.message.text + `\n\n🔇 משוב: לא נשמעו בומים`,
-              cbChatId, { editMessageId: cbMsgId }
-            );
-          } else {
-            // Ask intensity — update same message
-            const label = isRealtime ? `בומים בזמן אמת (${fbTime})` : "בומים (לא בזמן אמת)";
-            await sendTelegram(
-              cb.message.text + `\n\n💥 ${label}\nמה העוצמה?`,
-              cbChatId,
-              { editMessageId: cbMsgId, replyMarkup: { inline_keyboard: [[
-                { text: "🔈 חלש", callback_data: "fb_str_1" },
-                { text: "🔉 בינוני", callback_data: "fb_str_2" },
-                { text: "🔊 חזק", callback_data: "fb_str_3" },
-              ]] } }
-            );
-          }
-        } else if (cbData?.startsWith("fb_str_")) {
-          const level = parseInt(cbData.split("_")[2]);
-          const labels = { 1: "חלש", 2: "בינוני", 3: "חזק" };
-          if (feedbackLog.length > 0) feedbackLog[feedbackLog.length - 1].intensity = level;
-
-          await sendTelegram(
-            cb.message.text?.replace(/מה העוצמה\?/, `עוצמה: ${labels[level]}`) + `\nטיל מתפצל?`,
-            cbChatId,
-            { editMessageId: cbMsgId, replyMarkup: { inline_keyboard: [[
-              { text: "💣 מתפצל", callback_data: "fb_mirv_yes" },
-              { text: "🚀 רגיל", callback_data: "fb_mirv_no" },
-              { text: "🤷 לא בטוח", callback_data: "fb_mirv_unknown" },
-            ]] } }
-          );
-        } else if (cbData?.startsWith("fb_mirv_")) {
-          const mirv = cbData === "fb_mirv_yes" ? true : cbData === "fb_mirv_no" ? false : null;
-          const mirvLabel = cbData === "fb_mirv_yes" ? "מתפצל" : cbData === "fb_mirv_no" ? "רגיל" : "לא ידוע";
-          if (feedbackLog.length > 0) feedbackLog[feedbackLog.length - 1].mirv = mirv;
           writeFileSync(FEEDBACK_PATH, JSON.stringify(feedbackLog, null, 2));
 
-          // Final update — remove buttons, show summary
-          await sendTelegram(
-            cb.message.text?.replace(/טיל מתפצל\?/, `טיל: ${mirvLabel}`) + `\n✅ משוב נשמר`,
-            cbChatId, { editMessageId: cbMsgId }
-          );
-          console.log(`[משוב] ${JSON.stringify(feedbackLog[feedbackLog.length - 1])}`);
+          // Add to event history and update message
+          if (eventPhase) {
+            eventHistory.push({ time: fbTime, text: `💥 בום${strong ? " חזק" : ""}` });
+            await updateEventMessage();
+          }
+          console.log(`[משוב] 💥 בום${strong ? " חזק" : ""} ${fbTime}`);
         }
         continue;
       }
