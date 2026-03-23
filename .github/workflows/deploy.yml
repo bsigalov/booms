@@ -10,10 +10,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: azure/login@v2
+      - uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
-          auth-type: creds
 
       - name: Build image in ACR
         run: az acr build --registry orefbotacr --image oref-bot:latest .
