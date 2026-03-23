@@ -15,6 +15,8 @@ if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 
 let lastAlertId = "";
+const seenAlertIds = new Map(); // id → timestamp, prevents reprocessing
+const SEEN_ID_TTL_MS = 300_000; // 5 min TTL
 let lastMapMessageId = null; // for editing map instead of resending
 let lastTextMessageId = null;
 let eventPhase = null; // null | "early_warning" | "alert" | "waiting" | "ended"
@@ -639,9 +641,14 @@ async function ensureHomeMarker() {
 // Resolve areas to coordinates
 async function resolveCoords(areas) {
   const coords = [];
+  const missed = [];
   for (const area of areas) {
     const coord = await geocode(area);
     if (coord) coords.push(coord);
+    else missed.push(area);
+  }
+  if (missed.length > 0) {
+    console.error(`[גיאוקוד] חסרים ${missed.length}/${areas.length}: ${missed.slice(0, 10).join(", ")}`);
   }
   return coords;
 }
@@ -754,10 +761,12 @@ async function sendTelegramPhoto(filePath, caption, chatId = TELEGRAM_CHANNEL_ID
       const res = await fetch(`${TELEGRAM_API}/editMessageMedia`, { method: "POST", body: form });
       const result = await res.json();
       if (result.ok) return result;
-      // If edit fails, fall through to send new
+      // Edit failed — log but do NOT fall through to new message (prevents duplicates)
+      console.error(`[טלגרם עריכה] editMessageMedia failed: ${JSON.stringify(result)}`);
+      return null;
     }
 
-    // Send new photo
+    // Send new photo (only when no existing message to edit)
     const form = new FormData();
     form.append("chat_id", chatId);
     form.append("photo", blob, "map.png");
@@ -884,8 +893,15 @@ async function fetchAlerts() {
     const parsed = JSON.parse(text);
     const alerts = Array.isArray(parsed) ? parsed : [parsed];
 
+    // Purge expired seen IDs
+    const now = Date.now();
+    for (const [id, ts] of seenAlertIds) {
+      if (now - ts > SEEN_ID_TTL_MS) seenAlertIds.delete(id);
+    }
+
     for (const alert of alerts) {
-      if (alert.id !== lastAlertId) {
+      if (!seenAlertIds.has(alert.id)) {
+        seenAlertIds.set(alert.id, now);
         lastAlertId = alert.id;
         const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
 
