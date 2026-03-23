@@ -12,6 +12,41 @@
 
 ---
 
+## Execution Model: Dev/Test Agent Split
+
+Each TDD task is executed by two separate agents with distinct roles:
+
+### Test Agent
+- Writes test files based on the task spec and expected behavior
+- Runs tests to confirm they FAIL (proving tests are meaningful)
+- After Dev Agent implements: reviews coverage, adds edge cases if needed
+- Commits test files
+
+### Dev Agent
+- Receives the test file as its contract (the "spec")
+- Implements the minimum code to make all tests pass
+- Runs tests to confirm PASS
+- Commits implementation files
+
+### Workflow per TDD task
+```
+1. Test Agent  → writes tests, runs them, confirms FAIL, commits
+2. Dev Agent   → implements code, runs tests, confirms PASS, commits
+3. Test Agent  → final review pass — runs full suite, adds edge cases
+```
+
+### Non-TDD tasks (scaffold, adapters, entry point)
+Dev Agent only — no separate test phase.
+
+### Parallel Batches
+```
+Batch 1 (parallel): Tasks 2, 3, 4, 5, 6, 7  — independent modules
+Batch 2 (parallel): Tasks 8, 9               — ingester + lifecycle
+Batch 3 (sequential): Tasks 10-18            — each depends on previous
+```
+
+---
+
 ## File Structure
 
 ```
