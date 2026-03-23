@@ -746,7 +746,7 @@ async function fetchAlerts() {
     for (const alert of alerts) {
       if (alert.id !== lastAlertId) {
         lastAlertId = alert.id;
-        const time = new Date().toLocaleTimeString("he-IL");
+        const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
 
         console.log(`\n[${time}] ${alert.title}`);
         console.log(`  סוג: ${alert.cat}`);
@@ -819,7 +819,7 @@ const TEST_SCENARIOS = [
 
 async function sendTestAlert() {
   const scenario = TEST_SCENARIOS[Math.floor(Math.random() * TEST_SCENARIOS.length)];
-  const time = new Date().toLocaleTimeString("he-IL");
+  const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
 
   const alertCoords = await resolveCoords(scenario.areas);
   const alertRegions = new Set();
@@ -909,6 +909,200 @@ async function pollTelegramCommands() {
     // timeout or network error — ignore
   }
 }
+
+// --- Historical Data: Backfill, Scraper, Correlation ---
+
+const ALERT_HISTORY_PATH = new URL("./alert-history.json", import.meta.url);
+const IMPACT_HISTORY_PATH = new URL("./impact-history.json", import.meta.url);
+const CORRELATION_PATH = new URL("./correlation-index.json", import.meta.url);
+
+// Backfill alert history from forwarded messages
+function backfillAlertHistory() {
+  try { readFileSync(ALERT_HISTORY_PATH); return; } catch {} // already exists
+
+  let lines;
+  try {
+    lines = readFileSync("/tmp/oref-forwarded-msgs.jsonl", "utf8").trim().split("\n");
+  } catch { console.log("אין הודעות מועברות לניתוח"); return; }
+
+  const events = [];
+  for (const line of lines) {
+    try {
+      const msg = JSON.parse(line);
+      if (!msg.text || !msg.text.includes("צבע אדום")) continue;
+      if (msg.text.includes("סיום אירוע")) continue;
+
+      const regions = new Set();
+      const settlements = [];
+      const regionPattern = /• ([^:]+):/g;
+      let match;
+      while ((match = regionPattern.exec(msg.text)) !== null) {
+        regions.add(match[1].trim());
+      }
+
+      const sectionPattern = /• [^:]+:\s*([^\n•]+)/g;
+      while ((match = sectionPattern.exec(msg.text)) !== null) {
+        const names = match[1].split(",").map(s =>
+          s.replace(/\(.*?\)/g, "").trim()
+        ).filter(Boolean);
+        settlements.push(...names);
+      }
+
+      const includesHome = settlements.some(s =>
+        s.includes(HOME_NAME) || HOME_NAME.includes(s)
+      );
+      const homeRegion = REGION_MAP[HOME_NAME];
+      const homeRegionIncluded = homeRegion ? regions.has(homeRegion) : false;
+
+      let closestDist = Infinity;
+      let coordCount = 0;
+      for (const s of settlements) {
+        const coord = fuzzyMatch(s);
+        if (coord) {
+          coordCount++;
+          const d = haversineKm(HOME_COORD, coord);
+          if (d < closestDist) closestDist = d;
+        }
+      }
+
+      events.push({
+        timestamp: msg.forward_date || msg.date,
+        regions: [...regions],
+        settlementCount: settlements.length,
+        includesHome,
+        homeRegionIncluded,
+        closestDistToHome: closestDist === Infinity ? 999 : Math.round(closestDist),
+        coordCount,
+      });
+    } catch {}
+  }
+
+  writeFileSync(ALERT_HISTORY_PATH, JSON.stringify({ events }, null, 2));
+  console.log(`Backfill: ${events.length} אירועים, ${events.filter(e => e.includesHome).length} כוללים ${HOME_NAME}`);
+}
+
+// Scrape impact reports from news channel
+const IMPACT_KEYWORDS = {
+  impact: ["נפילה", "נפל טיל", "פגיעה ישירה", "רקטה נפלה"],
+  debris: ["רסיס", "רסיסים", "שברי", "שברים", "רסיסי יירוט"],
+  interception: ["יירוט", "יורט", "מיירט"],
+};
+let lastScrapedMsgId = 0;
+
+async function scrapeImpactChannel() {
+  try {
+    const url = "https://t.me/s/aharonyediotoriginal";
+    const res = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; OrefBot/1.0)" },
+      signal: AbortSignal.timeout(10000),
+    });
+    const html = await res.text();
+
+    const msgPattern = /data-post="[^/]+\/(\d+)"[\s\S]*?tgme_widget_message_text[^>]*>([\s\S]*?)<\/div>/g;
+    const reports = [];
+    let m;
+    while ((m = msgPattern.exec(html)) !== null) {
+      const msgId = parseInt(m[1]);
+      if (msgId <= lastScrapedMsgId) continue;
+
+      const text = m[2].replace(/<[^>]+>/g, "").trim();
+      if (!text) continue;
+
+      let type = null;
+      for (const [t, keywords] of Object.entries(IMPACT_KEYWORDS)) {
+        if (keywords.some(kw => text.includes(kw))) { type = t; break; }
+      }
+      if (!type) continue;
+
+      let location = null, locationCoord = null;
+      const sortedCities = Object.entries(CITY_COORDS).sort((a, b) => b[0].length - a[0].length);
+      for (const [city, coord] of sortedCities) {
+        if (text.includes(city)) { location = city; locationCoord = coord; break; }
+      }
+
+      const distToHome = locationCoord ? Math.round(haversineKm(HOME_COORD, locationCoord)) : null;
+      reports.push({ msgId, text: text.substring(0, 200), type, location, distToHome });
+      if (msgId > lastScrapedMsgId) lastScrapedMsgId = msgId;
+    }
+
+    if (reports.length > 0) {
+      let existing = { reports: [] };
+      try { existing = JSON.parse(readFileSync(IMPACT_HISTORY_PATH, "utf8")); } catch {}
+      existing.reports.push(...reports);
+      if (existing.reports.length > 500) existing.reports = existing.reports.slice(-500);
+      writeFileSync(IMPACT_HISTORY_PATH, JSON.stringify(existing, null, 2));
+      console.log(`[סריקה] ${reports.length} דיווחי נפילה חדשים`);
+    }
+  } catch {}
+}
+
+// Build correlation index from historical data
+function buildCorrelationIndex() {
+  let alertHistory;
+  try { alertHistory = JSON.parse(readFileSync(ALERT_HISTORY_PATH, "utf8")); } catch { return; }
+
+  const events = alertHistory.events || [];
+  if (events.length === 0) return;
+
+  const totalEvents = events.length;
+  const homeAlertEvents = events.filter(e => e.includesHome).length;
+  const homeRegionEvents = events.filter(e => e.homeRegionIncluded).length;
+
+  const regionCounts = {};
+  const regionWithHome = {};
+  for (const evt of events) {
+    for (const region of evt.regions) {
+      regionCounts[region] = (regionCounts[region] || 0) + 1;
+      if (evt.includesHome || evt.homeRegionIncluded) {
+        regionWithHome[region] = (regionWithHome[region] || 0) + 1;
+      }
+    }
+  }
+
+  const regionCorrelation = {};
+  for (const [region, count] of Object.entries(regionCounts)) {
+    regionCorrelation[region] = {
+      totalAlerts: count,
+      homeAlsoAlerted: regionWithHome[region] || 0,
+      probability: count > 0 ? Math.round(((regionWithHome[region] || 0) / count) * 100) / 100 : 0,
+    };
+  }
+
+  let impactHistory;
+  try { impactHistory = JSON.parse(readFileSync(IMPACT_HISTORY_PATH, "utf8")); } catch { impactHistory = { reports: [] }; }
+
+  const impactsNearHome = impactHistory.reports.filter(r => r.distToHome !== null && r.distToHome < 15 && r.type === "impact").length;
+  const debrisNearHome = impactHistory.reports.filter(r => r.distToHome !== null && r.distToHome < 20 && r.type === "debris").length;
+
+  const pImpact = homeAlertEvents > 0 ? Math.round((impactsNearHome / Math.max(homeAlertEvents, 1)) * 100) / 100 : 0.18;
+  const pDebris = homeAlertEvents > 0 ? Math.round((debrisNearHome / Math.max(homeAlertEvents, 1)) * 100) / 100 : 0.30;
+
+  const index = {
+    homeLocation: { name: HOME_NAME, coord: HOME_COORD },
+    totalAlertEvents: totalEvents,
+    homeAlertEvents,
+    homeRegionEvents,
+    regionCorrelation,
+    impactGivenAlert: { impactsNearHome, total: homeAlertEvents, pImpact: Math.max(pImpact, 0.05) },
+    debrisGivenAlert: { debrisNearHome, total: homeAlertEvents, pDebris: Math.max(pDebris, 0.10) },
+    lastUpdated: new Date().toISOString(),
+  };
+
+  writeFileSync(CORRELATION_PATH, JSON.stringify(index, null, 2));
+  correlationIndex = index;
+  console.log(`[אינדקס] ${totalEvents} אירועים, ${homeAlertEvents} כוללים ${HOME_NAME}, ${Object.keys(regionCorrelation).length} אזורים`);
+}
+
+// --- Startup: load historical data ---
+backfillAlertHistory();
+buildCorrelationIndex();
+
+// Scrape impact channel every 60 seconds
+setInterval(scrapeImpactChannel, 60000);
+scrapeImpactChannel();
+
+// Rebuild correlation index every hour
+setInterval(buildCorrelationIndex, 3600000);
 
 // Register bot menu commands
 await fetch(`${TELEGRAM_API}/setMyCommands`, {
