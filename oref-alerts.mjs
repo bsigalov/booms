@@ -25,6 +25,7 @@ let eventStartTimeStr = null;
 let eventTitle = "";
 let eventType = ""; // alert.cat — for event grouping
 let eventSettlements = new Set();
+let eventWaves = []; // [{settlements: Set, time: string}] — ordered alert waves for coloring
 let eventHistory = []; // [{time, text}]
 let eventProtectionMin = 10; // parsed from desc
 let eventRiskMsg = ""; // cached risk text
@@ -167,6 +168,28 @@ try {
 } catch {
   console.log("coords-cache.json לא נמצא — משתמשים במילון מובנה בלבד");
 }
+
+// Load settlement boundary data (polygons for >10K population)
+let SETTLEMENT_BOUNDARIES = {};
+try {
+  SETTLEMENT_BOUNDARIES = JSON.parse(readFileSync(new URL("./settlement-boundaries.json", import.meta.url), "utf8"));
+  console.log(`נטענו גבולות ל-${Object.keys(SETTLEMENT_BOUNDARIES).length} ישובים מ-settlement-boundaries.json`);
+} catch {
+  console.log("settlement-boundaries.json לא נמצא — מפות ללא שטחים");
+}
+
+// Wave color palette: early_warning = orange, waves 1-6 = dark→light red
+const WAVE_COLORS = {
+  early_warning: { fill: "#FF980080", stroke: "#E65100" },  // orange
+  waves: [
+    { fill: "#C6282899", stroke: "#B71C1C" },  // wave 1 — dark red
+    { fill: "#E5393580", stroke: "#C62828" },  // wave 2 — crimson
+    { fill: "#EF535070", stroke: "#D32F2F" },  // wave 3 — red
+    { fill: "#F4433660", stroke: "#E53935" },  // wave 4 — medium red
+    { fill: "#FF515150", stroke: "#EF5347" },  // wave 5 — light red
+    { fill: "#FF6E6E45", stroke: "#F44336" },  // wave 6 — pink-red
+  ],
+};
 
 // Major cities (recognized by name) and region mapping
 const MAJOR_CITIES = new Set([
@@ -599,43 +622,23 @@ function formatRiskMessage(alertCoords, alertRegions, alertSettlements) {
   );
 }
 
-// Create red map pin marker PNG
-const MARKER_SVG = `<svg width="36" height="48" xmlns="http://www.w3.org/2000/svg">
-  <filter id="s" x="-20%" y="-20%" width="140%" height="140%">
-    <feDropShadow dx="1" dy="2" stdDeviation="2" flood-opacity="0.4"/>
-  </filter>
-  <path d="M18 47 C18 47 3 28 3 18 A15 15 0 1 1 33 18 C33 28 18 47 18 47Z"
-        fill="#e53935" stroke="white" stroke-width="2" filter="url(#s)"/>
-  <circle cx="18" cy="17" r="6" fill="white" opacity="0.9"/>
+// Small dot marker for settlements <10K population
+const DOT_SVG = `<svg width="10" height="10" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="5" cy="5" r="4" fill="#e53935" stroke="white" stroke-width="1" opacity="0.85"/>
 </svg>`;
-const MARKER_PATH = "/tmp/oref-marker.png";
+const DOT_MARKER_PATH = "/tmp/oref-dot-marker.png";
 
-import sharp from "sharp";
-
-async function ensureMarkerIcon() {
-  try { readFileSync(MARKER_PATH); } catch {
-    try { await sharp(Buffer.from(MARKER_SVG)).png().toFile(MARKER_PATH); }
-    catch (e) { console.error("[מפה] שגיאה ביצירת marker:", e.message); }
-  }
-}
-
-// Home marker SVG (blue pin)
-const HOME_SVG = `<svg width="36" height="48" xmlns="http://www.w3.org/2000/svg">
-  <filter id="hs" x="-20%" y="-20%" width="140%" height="140%">
-    <feDropShadow dx="1" dy="2" stdDeviation="2" flood-opacity="0.4"/>
-  </filter>
-  <path d="M18 47 C18 47 3 28 3 18 A15 15 0 1 1 33 18 C33 28 18 47 18 47Z"
-        fill="#1976D2" stroke="white" stroke-width="2" filter="url(#hs)"/>
-  <circle cx="18" cy="17" r="6" fill="white" opacity="0.9"/>
+// Home marker (blue dot, larger)
+const HOME_SVG = `<svg width="18" height="18" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="9" cy="9" r="7" fill="#1976D2" stroke="white" stroke-width="2" opacity="0.95"/>
 </svg>`;
 const HOME_MARKER_PATH = "/tmp/oref-home-marker.png";
 
-async function ensureHomeMarker() {
-  try {
-    readFileSync(HOME_MARKER_PATH);
-  } catch {
-    await sharp(Buffer.from(HOME_SVG)).png().toFile(HOME_MARKER_PATH);
-  }
+import sharp from "sharp";
+
+async function ensureMarkers() {
+  try { await sharp(Buffer.from(DOT_SVG)).png().toFile(DOT_MARKER_PATH); } catch {}
+  try { await sharp(Buffer.from(HOME_SVG)).png().toFile(HOME_MARKER_PATH); } catch {}
 }
 
 // Resolve areas to coordinates
@@ -653,13 +656,18 @@ async function resolveCoords(areas) {
   return coords;
 }
 
-// Generate map image with alert markers + home marker
-async function generateAlertMap(areas, alertCoords = null) {
-  await ensureMarkerIcon();
-  await ensureHomeMarker();
+// Determine which wave a settlement belongs to (0-based index, or -1 for early warning only)
+function getSettlementWaveIndex(settlement) {
+  for (let i = eventWaves.length - 1; i >= 0; i--) {
+    if (eventWaves[i].settlements.has(settlement)) return i;
+  }
+  return -1; // early warning / not in any wave
+}
 
-  const coords = alertCoords || await resolveCoords(areas);
-  if (coords.length === 0) return null;
+// Generate map with polygon areas for large settlements and dots for small ones
+async function generateAlertMap(areas) {
+  await ensureMarkers();
+  if (areas.length === 0) return null;
 
   const map = new StaticMaps({
     width: 800,
@@ -669,25 +677,80 @@ async function generateAlertMap(areas, alertCoords = null) {
     tileUrl: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
   });
 
-  for (const coord of coords) {
-    map.addMarker({
-      coord,
-      img: MARKER_PATH,
-      height: 48,
-      width: 36,
-      offsetX: 18,
-      offsetY: 48,
-    });
+  const isEarlyWarning = eventPhase === "early_warning";
+
+  // Group settlements by wave for coloring
+  const earlyWarningSettlements = []; // no wave yet
+  const waveGroups = eventWaves.map(() => []); // per-wave arrays
+
+  for (const area of areas) {
+    const waveIdx = getSettlementWaveIndex(area);
+    if (waveIdx >= 0 && waveIdx < waveGroups.length) {
+      waveGroups[waveIdx].push(area);
+    } else {
+      earlyWarningSettlements.push(area);
+    }
   }
 
-  // Add home marker (blue pin for Rehovot)
+  // Render function: add polygon or dot for a settlement
+  const renderSettlement = (area, colors) => {
+    // Check if we have boundary data for this settlement (>10K population)
+    const boundaryData = SETTLEMENT_BOUNDARIES[area];
+    // Also check partial match for subdivisions like "אשקלון - דרום" → "אשקלון"
+    const parentName = !boundaryData ? Object.keys(SETTLEMENT_BOUNDARIES).find(k => area.includes(k)) : null;
+    const bd = boundaryData || (parentName ? SETTLEMENT_BOUNDARIES[parentName] : null);
+
+    if (bd?.boundary && bd.population >= 10000) {
+      // Render as filled polygon
+      const geojson = bd.boundary;
+      const rings = geojson.type === "MultiPolygon"
+        ? geojson.coordinates.flat()
+        : geojson.coordinates;
+      for (const ring of rings) {
+        map.addPolygon({
+          coords: ring, // [lng, lat] pairs — matches staticmaps convention
+          color: colors.stroke,
+          fill: colors.fill,
+          width: 1.5,
+        });
+      }
+    } else {
+      // Render as small dot for settlements <10K or without boundary
+      const coord = fuzzyMatch(area) || CITY_COORDS[area];
+      if (coord) {
+        map.addMarker({
+          coord,
+          img: DOT_MARKER_PATH,
+          height: 10,
+          width: 10,
+          offsetX: 5,
+          offsetY: 5,
+        });
+      }
+    }
+  };
+
+  // Render early warning settlements (orange)
+  for (const area of earlyWarningSettlements) {
+    renderSettlement(area, isEarlyWarning ? WAVE_COLORS.early_warning : WAVE_COLORS.waves[0]);
+  }
+
+  // Render each wave with its color
+  for (let i = 0; i < waveGroups.length; i++) {
+    const colors = WAVE_COLORS.waves[Math.min(i, WAVE_COLORS.waves.length - 1)];
+    for (const area of waveGroups[i]) {
+      renderSettlement(area, colors);
+    }
+  }
+
+  // Add home marker (blue dot)
   map.addMarker({
     coord: HOME_COORD,
     img: HOME_MARKER_PATH,
-    height: 48,
-    width: 36,
-    offsetX: 18,
-    offsetY: 48,
+    height: 18,
+    width: 18,
+    offsetX: 9,
+    offsetY: 9,
   });
 
   try {
@@ -799,27 +862,47 @@ function parseProtectionMinutes(desc) {
   return 10;
 }
 
+// Get regions that had actual alerts (not just early warnings)
+function getAlertRegions() {
+  const alertSettlements = new Set();
+  for (const wave of eventWaves) {
+    for (const s of wave.settlements) alertSettlements.add(s);
+  }
+  const regions = new Set();
+  for (const s of alertSettlements) {
+    if (REGION_MAP[s]) regions.add(REGION_MAP[s]);
+    else {
+      for (const [key, region] of Object.entries(REGION_MAP)) {
+        if (s.includes(key)) { regions.add(region); break; }
+      }
+    }
+  }
+  return [...regions];
+}
+
 function buildEventMessage() {
   const now = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
-  const areaSummary = summarizeAreas([...eventSettlements]);
+  const allRegionsSummary = summarizeAreas([...eventSettlements]);
+  const alertRegions = getAlertRegions();
+  const alertRegionStr = alertRegions.length > 0 ? alertRegions.join(", ") : allRegionsSummary;
 
   let header, timeLine;
   if (eventPhase === "early_warning") {
-    header = `⚠️ <b>התרעה מוקדמת — ${eventTitle}</b>`;
+    header = `⚠️ <b>התרעה מוקדמת באזורים:</b> ${allRegionsSummary}`;
     timeLine = `⏰ ${eventStartTimeStr}`;
   } else if (eventPhase === "alert") {
-    header = `🚨 <b>אזעקות מופעלות — ${eventTitle}</b>`;
+    header = `🚨 <b>אזעקה באזורים:</b> ${alertRegionStr}`;
     timeLine = `⏰ ${eventStartTimeStr}`;
   } else if (eventPhase === "waiting") {
-    header = `🟡 <b>המתנה במרחב מוגן — ${eventTitle}</b>`;
+    header = `🟡 <b>שהייה במקלטים ב:</b> ${alertRegionStr}`;
     timeLine = `⏰ ${eventStartTimeStr}`;
   } else if (eventPhase === "ended") {
     const sec = Math.round((Date.now() - eventStartTime) / 1000);
-    header = `✅ <b>האירוע הסתיים — ${eventTitle}</b>`;
+    header = `✅ <b>אירוע הסתיים ב:</b> ${alertRegionStr}`;
     timeLine = `⏰ ${eventStartTimeStr}–${now} (${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")})`;
   }
 
-  let msg = `${header}\n${timeLine}\n📍 ${areaSummary}`;
+  let msg = `${header}\n${timeLine}`;
 
   // Risk analysis only during active phases
   if (eventPhase === "early_warning" || eventPhase === "alert") {
@@ -926,17 +1009,23 @@ async function fetchAlerts() {
           eventType = alert.cat;
           eventProtectionMin = parseProtectionMinutes(alert.desc);
           eventSettlements = new Set(alert.data);
+          eventWaves = []; // no waves yet — settlements are in early warning
           eventHistory = [{ time, text: `⚠️ התרעה מוקדמת: ${summarizeAreas(alert.data)} (${alert.data.length})` }];
           lastWaveTime = Date.now();
           lastTextMessageId = null;
           lastMapMessageId = null;
         } else {
-          // Continuing event
-          if (eventPhase === "early_warning") eventPhase = "alert";
+          // Continuing event — escalate to alert and track waves
+          const wasEarlyWarning = eventPhase === "early_warning";
+          if (wasEarlyWarning) eventPhase = "alert";
           if (eventPhase === "waiting") {
             eventPhase = "alert";
             eventHistory.push({ time, text: "🚨 אזעקות חודשו" });
           }
+
+          // Create a new wave for this alert batch
+          const waveSettlements = new Set(alert.data);
+          eventWaves.push({ settlements: waveSettlements, time });
 
           const newSettlements = alert.data.filter(s => !eventSettlements.has(s));
           for (const s of alert.data) eventSettlements.add(s);
@@ -966,12 +1055,12 @@ async function fetchAlerts() {
         }
         eventRiskMsg = formatRiskMessage(alertCoords, alertRegions, allAreas);
 
-        console.log(`\n[${time}] ${alert.title} [${eventPhase}] ${eventSettlements.size} ישובים`);
+        console.log(`\n[${time}] ${alert.title} [${eventPhase}] ${eventSettlements.size} ישובים, ${eventWaves.length} גלים`);
 
         await updateEventMessage();
 
-        // Map
-        const mapPath = await generateAlertMap(allAreas, alertCoords);
+        // Map with polygons + dots
+        const mapPath = await generateAlertMap(allAreas);
         if (mapPath) {
           await sendTelegramPhoto(mapPath, `📍 מפת התרעות - ${time} (${allAreas.length} ישובים)`);
         }
