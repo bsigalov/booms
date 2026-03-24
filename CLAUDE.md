@@ -1,59 +1,40 @@
 # Booms On The Way — Oref Alerts Bot
 
+## IMPORTANT: Read the spec first
+The full specification is at `docs/superpowers/specs/2026-03-24-booms-bot-spec.md`. Read it before making ANY changes. It defines the event lifecycle, Telegram behavior, map generation, geocoding, and testing requirements.
+
+## Critical Rules
+- **NEVER overwrite working code with inferior versions.** Always check existing implementations before writing new code.
+- **NEVER treat the first alert as "early warning" by default.** Check the actual Oref title/category.
+- **NEVER merge test events with real events.**
+- **`ended` events are FINAL.** No reopening. New alerts create new events.
+- **`waiting` is only reachable from `alert`**, not from `early_warning`.
+
 ## Architecture
-Single-file Node.js ESM application (`oref-alerts.mjs`) with no framework. Runs as a long-lived process polling two sources:
+Single-file Node.js ESM application (`oref-alerts.mjs`). Runs as a long-lived process polling:
 - Oref alert API (every 1s)
 - Telegram bot commands (every 3s)
 
-## Key Components
-
-### Alert Flow
-`fetchAlerts()` → `resolveCoords()` → `analyzeRisk()` → `sendTelegram()` + `sendTelegramPhoto()`
-
-### Risk Engine (lines ~247-580)
-- `fitEllipse(coords)` — PCA on alert coordinates, returns semi-axes + azimuth
-- `classifyHomePosition(ellipse, home)` — Where is home relative to ellipse (START/END/CENTER/NEAR/FAR)
-- `trackExpansion(coords)` — Detect if alerts expand toward home using centroid drift
-- `calculatePAlert/PImpact/PDebris/PBoom` — Four probability functions
-- `analyzeRisk()` — Orchestrator that calls all above and returns combined result
-
-### Geocoding
-- `CITY_COORDS` — Hardcoded ~130 major cities
-- `coords-cache.json` — Extended cache with 1,183 settlements (loaded at startup via `Object.assign`)
-- `fuzzyMatch(place)` — Partial string matching for variants like "אשקלון - דרום"
-- `geocode(place)` — Falls back to Nominatim OSM API (1 req/sec rate limit)
-
-### Regions
-- `oref-regions-official.json` — 30 zones from IDF Home Front Command document
-- `REGION_MAP` — Loaded at startup: settlement name → region name
-- `summarizeAreas(areas)` — Reduces 100+ settlements to "region (city1, city2 ועוד)"
-
-### Telegram
-- Channel (`TELEGRAM_CHANNEL_ID`) — Public alert broadcasts
-- Private chat (`TELEGRAM_CHAT_ID`) — Bot commands + personal notifications
-- `sendTelegramPhoto()` — Uses `editMessageMedia` to update existing map in channel
-- `lastMapMessageId` — Tracks which message to edit
-
-### Map Generation
-- Uses `staticmaps` package with OpenStreetMap tiles
-- Red pins (alert locations) + blue pin (home)
-- SVG markers rendered to PNG via `sharp`
-- Output: 800x600 PNG at `/tmp/oref-alert-map.png`
+## Multi-Event System
+`activeEvents` Map — each geographic region gets its own event object with independent lifecycle, channel messages, and map. Events split when settlement centroid is >50km apart (cumulative).
 
 ## Coordinate Convention
 All coordinates are `[longitude, latitude]` (GeoJSON/staticmaps convention, NOT `[lat, lng]`).
 
-## Environment Variables
-Required: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
-Optional: `TELEGRAM_CHANNEL_ID`, `HOME_COORD`, `HOME_NAME`
+## Persistent Storage
+Azure File Share at `/data/`. All logs, scenarios, feedback, history written there. Falls back to app dir if `/data/` not mounted.
 
-## Testing
-Send `/test` to bot in private chat — picks random scenario, generates map + risk analysis, sends to both channel and private chat.
+## Key Files
+- `oref-alerts.mjs` — main bot (single file)
+- `coords-cache.json` — 1252+ settlement coordinates
+- `settlement-boundaries.json` — polygon data for 78+ settlements
+- `oref-regions-official.json` — 30 IDF Home Front Command zones
+- `mock-oref-server.mjs` — test scenario replay server
+- `docs/superpowers/specs/2026-03-24-booms-bot-spec.md` — full specification
 
 ## Deployment
-Azure Container Instance in Israel Central region (important: Oref API may block non-Israeli IPs).
-Docker image built via `az acr build`. Container has `--restart-policy Always`.
+Azure Container Instance, Israel Central. GitHub Actions on push to main.
+`az acr build` → `az container create` with `/data/` volume mount.
 
-## Dependencies
-- `staticmaps` — Static map generation from OSM tiles
-- `sharp` — SVG to PNG rendering (transitive via staticmaps)
+## Testing
+`/test` command redirects alert URL to mock server that replays real recorded scenarios. Test events labeled with `🧪 [טסט]` and isolated from real events.
