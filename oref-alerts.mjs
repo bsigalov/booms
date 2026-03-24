@@ -1,7 +1,8 @@
 import StaticMaps from "staticmaps";
 import { readFileSync, writeFileSync, appendFileSync, existsSync } from "fs";
+import { fork } from "child_process";
 
-const ALERT_URL = process.env.ALERT_URL || "https://www.oref.org.il/warningMessages/alert/alerts.json";
+let ALERT_URL = process.env.ALERT_URL || "https://www.oref.org.il/warningMessages/alert/alerts.json";
 const POLL_INTERVAL = 1000;
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -20,7 +21,6 @@ const seenAlertIds = new Map(); // id → timestamp, prevents reprocessing
 const SEEN_ID_TTL_MS = 300_000; // 5 min TTL
 let feedbackLog = [];
 let simActive = false;
-let simResponse = "";
 let lastUpdateId = 0; // shared between pollTelegramCommands and resolveDiscussionThread
 
 // Persistent data directory — /data/ when Azure File Share is mounted, fallback to app dir
@@ -1239,18 +1239,13 @@ async function sendDiscussionUpdate(evt, updateType, details, alert = null) {
 // Poll alerts with multi-event lifecycle
 async function fetchAlerts() {
   try {
-    let text;
-    if (simActive) {
-      text = simResponse;
-    } else {
-      const res = await fetch(ALERT_URL, {
-        headers: {
-          "X-Requested-With": "XMLHttpRequest",
-          Referer: "https://www.oref.org.il/",
-        },
-      });
-      text = await res.text();
-    }
+    const res = await fetch(ALERT_URL, {
+      headers: {
+        "X-Requested-With": "XMLHttpRequest",
+        Referer: "https://www.oref.org.il/",
+      },
+    });
+    const text = await res.text();
 
     // No active alert — advance lifecycle for all active events
     if (!text.trim()) {
@@ -1575,69 +1570,63 @@ function saveScenario(evt) {
 // Simulation: replay real scenarios compressed to ~2 minutes
 const SIM_TOTAL_MS = 120000; // 2 minutes total
 let simTimers = [];
+let mockServerProcess = null;
+const MOCK_PORT = 3333;
 
 function startSimulation() {
   if (simActive) return;
 
   const scenario = TEST_SCENARIOS[Math.floor(Math.random() * TEST_SCENARIOS.length)];
-  const waves = scenario.waves || [];
-  const totalSettlements = waves.flat().length;
+  if (!scenario) {
+    sendTelegram("❌ אין תסריטי בדיקה זמינים", TELEGRAM_CHAT_ID);
+    return;
+  }
 
+  const totalSettlements = (scenario.waves || []).flat().length;
   simActive = true;
-  console.log(`[sim] ${scenario.title} — ${totalSettlements} settlements, ${waves.length} waves`);
 
   sendTelegram(
     `🧪 <b>סימולציה מתחילה</b>\n` +
     `📋 ${scenario.title}\n` +
-    `👥 ${totalSettlements} ישובים ב-${waves.length} גלים\n` +
+    `👥 ${totalSettlements} ישובים ב-${(scenario.waves || []).length} גלים\n` +
     `⏱ משך: 2 דקות\n\n` +
     `⚠️ התרעות אמיתיות לא ייקלטו בזמן הסימולציה`,
     TELEGRAM_CHAT_ID
   );
 
-  // Spread waves evenly across first 60% of the 2 min window
-  const waveWindow = SIM_TOTAL_MS * 0.6; // 72s for waves
-  const waveInterval = waves.length > 1 ? waveWindow / (waves.length - 1) : 0;
+  const idx = TEST_SCENARIOS.indexOf(scenario);
+  const mockPath = new URL("./mock-oref-server.mjs", import.meta.url).pathname;
+  mockServerProcess = fork(mockPath, [TEST_SCENARIOS_PATH, String(idx)], { silent: true });
 
-  waves.forEach((waveAreas, i) => {
-    const delay = Math.round(i * waveInterval);
-    const timer = setTimeout(() => {
-      simResponse = JSON.stringify({
-        id: `sim-${Date.now()}`,
-        cat: "1",
-        title: `🧪 ${scenario.title}`,
-        desc: scenario.desc,
-        data: waveAreas,
-      });
-      console.log(`[sim] wave ${i + 1}/${waves.length} (t+${Math.round(delay/1000)}s): ${waveAreas.length} settlements`);
-    }, delay);
-    simTimers.push(timer);
+  mockServerProcess.stdout?.on("data", d => console.log(`[mock] ${d.toString().trim()}`));
+  mockServerProcess.stderr?.on("data", d => console.error(`[mock:err] ${d.toString().trim()}`));
+
+  mockServerProcess.on("exit", (code) => {
+    console.log(`[mock] server exited (code=${code})`);
+    ALERT_URL = process.env.ALERT_URL || "https://www.oref.org.il/warningMessages/alert/alerts.json";
+    simActive = false;
+    mockServerProcess = null;
+    sendTelegram("🧪 הסימולציה הסתיימה — חזרה למצב אמיתי", TELEGRAM_CHAT_ID);
   });
 
-  // Clear alert at 70% → triggers waiting
-  const clearDelay = Math.round(SIM_TOTAL_MS * 0.7);
-  simTimers.push(setTimeout(() => {
-    simResponse = "";
-    console.log(`[sim] cleared (t+${Math.round(clearDelay/1000)}s) — waiting for shelter + end`);
-  }, clearDelay));
-
-  // End simulation at 100%
-  simTimers.push(setTimeout(() => {
-    simActive = false;
-    simResponse = "";
-    simTimers = [];
-    console.log("[sim] done");
-    sendTelegram("🧪 הסימולציה הסתיימה — חזרה למצב אמיתי", TELEGRAM_CHAT_ID);
-  }, SIM_TOTAL_MS));
+  // Redirect after brief startup delay
+  setTimeout(() => {
+    ALERT_URL = `http://localhost:${MOCK_PORT}`;
+    console.log(`[sim] ALERT_URL redirected to ${ALERT_URL}`);
+  }, 1000);
 }
 
 function stopSimulation() {
   if (!simActive) return;
+  if (mockServerProcess) {
+    mockServerProcess.kill();
+    mockServerProcess = null;
+  }
+  ALERT_URL = process.env.ALERT_URL || "https://www.oref.org.il/warningMessages/alert/alerts.json";
+  simActive = false;
   simTimers.forEach(t => clearTimeout(t));
   simTimers = [];
-  simActive = false;
-  simResponse = "";
-  console.log("[סימולציה] בוטלה");
+  console.log("[sim] cancelled");
   sendTelegram("🧪 הסימולציה בוטלה — חזרה למצב אמיתי", TELEGRAM_CHAT_ID);
 }
 
