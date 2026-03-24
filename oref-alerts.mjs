@@ -918,9 +918,26 @@ async function sendTelegramPhoto(filePath, caption, chatId = TELEGRAM_CHANNEL_ID
 
 // --- Event lifecycle helpers ---
 
-const BOOM_BUTTONS = { inline_keyboard: [[
-  { text: "💥 שמעתי בום!", callback_data: "fb_boom" },
+// Boom button opens bot DM with questionnaire via deep link
+let botUsername = process.env.BOT_USERNAME || "";
+let BOOM_BUTTONS = { inline_keyboard: [[
+  { text: "💥 שמעתי בום!", callback_data: "fb_boom" }, // fallback until username is resolved
 ]] };
+
+// Auto-detect bot username at startup
+(async () => {
+  try {
+    const res = await fetch(`${TELEGRAM_API}/getMe`);
+    const data = await res.json();
+    if (data.ok && data.result.username) {
+      botUsername = data.result.username;
+      BOOM_BUTTONS = { inline_keyboard: [[
+        { text: "💥 שמעתי בום!", url: `https://t.me/${botUsername}?start=boom` },
+      ]] };
+      console.log(`Bot username: @${botUsername}`);
+    }
+  } catch {}
+})();
 
 function parseProtectionMinutes(desc) {
   const m = desc.match(/(\d+)\s*דקות/);
@@ -1265,6 +1282,89 @@ function stopSimulation() {
   sendTelegram("🧪 הסימולציה בוטלה — חזרה למצב אמיתי", TELEGRAM_CHAT_ID);
 }
 
+// --- Boom Questionnaire ---
+// Sessions: chatId → { step, data: { intensity, type, count, intercept } }
+const boomSessions = new Map();
+const BOOM_SESSION_TIMEOUT_MS = 120_000; // 2 min
+
+async function startBoomQuestionnaire(chatId) {
+  boomSessions.set(chatId, { step: "intensity", data: {}, startTime: Date.now() });
+  await sendTelegram(
+    "💥 <b>דיווח בום</b>\n\nמה העוצמה?\n\n1️⃣ חלש\n2️⃣ בינוני\n3️⃣ חזק\n4️⃣ חזק מאוד",
+    chatId
+  );
+}
+
+async function handleBoomResponse(chatId, text) {
+  const session = boomSessions.get(chatId);
+  if (!session) return;
+
+  // Timeout check
+  if (Date.now() - session.startTime > BOOM_SESSION_TIMEOUT_MS) {
+    boomSessions.delete(chatId);
+    await sendTelegram("⏰ הדיווח פג תוקף. לחץ על הכפתור שוב לדיווח חדש.", chatId);
+    return;
+  }
+
+  const answer = text.trim();
+
+  if (session.step === "intensity") {
+    const map = { "1": 1, "2": 2, "3": 3, "4": 4 };
+    if (!map[answer]) {
+      await sendTelegram("בחר 1-4:", chatId);
+      return;
+    }
+    session.data.intensity = map[answer];
+    session.step = "type";
+    await sendTelegram(
+      "מה שמעת?\n\n1️⃣ יירוט (פיצוץ באוויר)\n2️⃣ נפילה (פגיעה בקרקע)\n3️⃣ לא בטוח",
+      chatId
+    );
+  } else if (session.step === "type") {
+    const map = { "1": "intercept", "2": "impact", "3": "unknown" };
+    if (!map[answer]) {
+      await sendTelegram("בחר 1-3:", chatId);
+      return;
+    }
+    session.data.type = map[answer];
+    session.step = "count";
+    await sendTelegram("כמה בומים שמעת? (מספר)", chatId);
+  } else if (session.step === "count") {
+    const num = parseInt(answer);
+    if (isNaN(num) || num < 1 || num > 50) {
+      await sendTelegram("הקלד מספר בין 1 ל-50:", chatId);
+      return;
+    }
+    session.data.count = num;
+    boomSessions.delete(chatId);
+
+    // Save feedback
+    const fbTime = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
+    const intensityText = ["", "חלש", "בינוני", "חזק", "חזק מאוד"][session.data.intensity];
+    const typeText = { intercept: "יירוט", impact: "נפילה", unknown: "לא ברור" }[session.data.type];
+
+    feedbackLog.push({
+      type: "boom",
+      intensity: session.data.intensity,
+      boomType: session.data.type,
+      count: session.data.count,
+      time: fbTime, timestamp: Date.now(),
+      chatId,
+    });
+    writeFileSync(FEEDBACK_PATH, JSON.stringify(feedbackLog, null, 2));
+
+    await sendTelegram(`✅ דיווח נרשם: ${intensityText}, ${typeText}, ×${num}\nתודה!`, chatId);
+
+    // Add to event history
+    if (eventPhase && eventPhase !== "ended") {
+      eventHistory.push({ time: fbTime, text: `💥 דיווח: ${intensityText}, ${typeText} ×${num}` });
+      await updateEventMessage();
+    }
+
+    console.log(`[משוב] 💥 דיווח בום: ${intensityText}, ${typeText}, ×${num} ${fbTime}`);
+  }
+}
+
 // Listen for /test command via Telegram polling
 const TELEGRAM_UPDATES_URL = `${TELEGRAM_API}/getUpdates`;
 let lastUpdateId = 0;
@@ -1280,29 +1380,11 @@ async function pollTelegramCommands() {
     for (const update of data.result) {
       lastUpdateId = update.update_id;
 
-      // Handle boom feedback buttons
+      // Legacy callback handler for old cached messages
       if (update.callback_query) {
         const cb = update.callback_query;
-        const cbData = cb.data;
-
-        if (cbData === "fb_boom" || cbData === "fb_boom_strong") {
-          const strong = cbData === "fb_boom_strong";
-          const fbTime = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
-
-          await answerCallback(cb.id, `💥 בום נרשם! (${strong ? "חזק" : "רגיל"})`);
-
-          feedbackLog.push({
-            type: "boom", intensity: strong ? 3 : 1,
-            time: fbTime, timestamp: Date.now(),
-          });
-          writeFileSync(FEEDBACK_PATH, JSON.stringify(feedbackLog, null, 2));
-
-          // Add to event history and update message
-          if (eventPhase) {
-            eventHistory.push({ time: fbTime, text: `💥 בום${strong ? " חזק" : ""}` });
-            await updateEventMessage();
-          }
-          console.log(`[משוב] 💥 בום${strong ? " חזק" : ""} ${fbTime}`);
+        if (cb.data?.startsWith("fb_boom")) {
+          await answerCallback(cb.id, "לחץ על הכפתור החדש לדיווח מפורט 💥");
         }
         continue;
       }
@@ -1310,6 +1392,19 @@ async function pollTelegramCommands() {
       const text = update.message?.text || update.message?.forward_text || "";
       const fwdText = update.message?.forward_from_chat ? text : "";
       const chatId = update.message?.chat?.id?.toString();
+
+      // Handle /start boom from any user (deep link from channel button)
+      if (text.startsWith("/start boom")) {
+        await startBoomQuestionnaire(chatId);
+        continue;
+      }
+
+      // Handle boom questionnaire responses from any user in active sessions
+      if (boomSessions.has(chatId)) {
+        await handleBoomResponse(chatId, text);
+        continue;
+      }
+
       if (chatId !== TELEGRAM_CHAT_ID) continue;
 
       // Save forwarded messages for analysis
