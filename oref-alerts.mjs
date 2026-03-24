@@ -1332,8 +1332,8 @@ async function fetchAlerts() {
       }
 
       // Find or create the right event for these settlements
-      // Simulations always create fresh events (never merge with real)
-      const nearest = simActive ? null : findNearestEvent(settlements);
+      // findNearestEvent already prevents test/real cross-contamination via isTest flag
+      const nearest = findNearestEvent(settlements);
       let evt;
 
       if (nearest) {
