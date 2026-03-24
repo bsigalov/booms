@@ -1,12 +1,12 @@
-# Fix Discussion Comments Threading Implementation Plan
+# Fix Discussion Threading + Deployment Pipeline
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make discussion group updates appear as comments on the channel post, not standalone messages.
+**Goal:** (1) Make discussion group updates appear as comments on the channel post. (2) Fix the deployment pipeline so container always picks up the latest image.
 
-**Architecture:** Three-step approach: (1) Add diagnostic logging to understand what Telegram responds to our `reply_parameters`. (2) If cross-chat reply works, we're done. (3) If it doesn't, use a fallback: after sending a channel post, poll `getUpdates` with a dedicated call to find the auto-forwarded message's ID, then use `message_thread_id` for subsequent discussion messages.
+**Architecture:** Discussion threading: diagnostic logging → verify cross-chat reply → fallback to auto-forward detection. Deployment: use unique image tags (git SHA) instead of `:latest`, delete+recreate container to force fresh pull, add health check verification step.
 
-**Tech Stack:** Node.js ESM, Telegram Bot API 7.0+
+**Tech Stack:** Node.js ESM, Telegram Bot API 7.0+, GitHub Actions, Azure CLI
 
 **Spec reference:** `docs/superpowers/specs/2026-03-24-booms-bot-spec.md` Section 3 (Discussion Group)
 
@@ -183,24 +183,131 @@ git commit -m "fix: detect discussion thread via dedicated getUpdates after chan
 
 ---
 
-### Task 4: Deploy and verify
+### Task 4: Fix deployment pipeline
 
-- [ ] **Step 1: Push and force recreate container**
+The current pipeline uses `:latest` tag which gets cached by Azure. The container often keeps running the old image after deploy. Fix: use git SHA as image tag, delete container before recreate, add verification step.
 
-- [ ] **Step 2: Send /test or wait for real alert**
+**Files:**
+- Modify: `.github/workflows/deploy.yml`
 
-- [ ] **Step 3: Check discussion group**
+- [ ] **Step 1: Use git SHA as image tag**
+
+Replace the build step:
+```yaml
+      - name: Build image in ACR
+        run: az acr build --registry orefbotacr --image oref-bot:${{ github.sha }} --image oref-bot:latest .
+```
+
+This builds with BOTH the SHA tag (unique, never cached) and `:latest` (for manual use).
+
+- [ ] **Step 2: Delete container before recreate**
+
+Add a delete step before the create step and use the SHA-tagged image:
+```yaml
+      - name: Delete old container
+        env:
+          STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
+        run: az container delete --resource-group oref-bot-rg --name oref-bot --yes || true
+
+      - name: Deploy container with persistent storage
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
+          ACR_PASS: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          az container create \
+            --resource-group oref-bot-rg \
+            --name oref-bot \
+            --image orefbotacr.azurecr.io/oref-bot:${{ github.sha }} \
+            --registry-login-server orefbotacr.azurecr.io \
+            --registry-username orefbotacr \
+            --registry-password "$ACR_PASS" \
+            --cpu 0.5 --memory 0.5 \
+            --os-type Linux \
+            --restart-policy Always \
+            --environment-variables \
+              TELEGRAM_BOT_TOKEN="$BOT_TOKEN" \
+              TELEGRAM_CHAT_ID="$CHAT_ID" \
+              TELEGRAM_CHANNEL_ID=@booms_on_the_way \
+              TZ=Asia/Jerusalem \
+            --azure-file-volume-account-name orefbotstorage \
+            --azure-file-volume-account-key "$STORAGE_KEY" \
+            --azure-file-volume-share-name oref-data \
+            --azure-file-volume-mount-path /data
+```
+
+- [ ] **Step 3: Add health check verification**
+
+Add a step that waits for the container to start and verifies it's running the new image:
+```yaml
+      - name: Verify deployment
+        run: |
+          echo "Waiting for container to start..."
+          sleep 30
+          STATE=$(az container show --resource-group oref-bot-rg --name oref-bot --query "containers[0].instanceView.currentState.state" -o tsv)
+          IMAGE=$(az container show --resource-group oref-bot-rg --name oref-bot --query "containers[0].image" -o tsv)
+          echo "State: $STATE"
+          echo "Image: $IMAGE"
+          if [ "$STATE" != "Running" ]; then
+            echo "ERROR: Container is not running!"
+            az container logs --resource-group oref-bot-rg --name oref-bot || true
+            exit 1
+          fi
+          echo "Container running with image: $IMAGE"
+```
+
+- [ ] **Step 4: Verify syntax**
+
+Check the YAML is valid by reviewing the file.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add .github/workflows/deploy.yml
+git commit -m "fix: deployment uses SHA tags, delete+recreate, health check"
+```
+
+---
+
+### Task 5: Deploy and verify everything
+
+- [ ] **Step 1: Push all changes**
+
+```bash
+git push origin main
+```
+
+- [ ] **Step 2: Watch the deploy pipeline**
+
+```bash
+gh run watch
+```
 
 Verify:
-- Updates appear as **comments** on the channel post
-- "Leave a Comment" on channel shows comment count
-- Boom button appears in the thread
-- Logs show `[discussion] thread found: XXX`
+- Build uses SHA tag
+- Old container deleted
+- New container created with SHA-tagged image
+- Health check passes (state=Running, image contains SHA)
 
-- [ ] **Step 4: If still not working**
+- [ ] **Step 3: Verify container is running new code**
+
+```bash
+az container logs --resource-group oref-bot-rg --name oref-bot | head -5
+```
+
+Expected: `Data directory: /data`, correct startup logs.
+
+- [ ] **Step 4: Send /test or wait for real alert**
+
+Check:
+- Discussion updates appear as comments on channel post
+- Logs show `[telegram] sendMessage → ... reply_to=XXX` or `[discussion] thread found: XXX`
+- No more stale container issues
+
+- [ ] **Step 5: If discussion threading still not working**
 
 If the auto-forward message is NOT received via getUpdates:
-- The bot may not have the right permissions in the discussion group
-- Check bot privacy mode: must be disabled (via @BotFather → /setprivacy → Disable)
-- Or: the bot needs to be admin in the discussion group with explicit "read messages" permission
+- Check bot privacy mode: @BotFather → /setprivacy → Disable
+- Check bot is admin in the discussion group with "read messages" permission
 - Document findings and escalate to user
