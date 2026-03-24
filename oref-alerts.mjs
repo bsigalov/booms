@@ -656,6 +656,51 @@ async function resolveCoords(areas) {
   return coords;
 }
 
+// Cluster detection: split settlements into geographically distinct groups
+// Uses single-linkage clustering with 60km threshold
+const CLUSTER_DISTANCE_KM = 60;
+
+function clusterSettlements(areas) {
+  // Resolve coordinates for each area
+  const items = [];
+  for (const area of areas) {
+    const coord = fuzzyMatch(area) || CITY_COORDS[area];
+    if (coord) items.push({ area, coord });
+  }
+  if (items.length === 0) return [areas];
+
+  // Single-linkage clustering: union-find
+  const parent = items.map((_, i) => i);
+  const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+  const union = (a, b) => { parent[find(a)] = find(b); };
+
+  for (let i = 0; i < items.length; i++) {
+    for (let j = i + 1; j < items.length; j++) {
+      if (haversineKm(items[i].coord, items[j].coord) < CLUSTER_DISTANCE_KM) {
+        union(i, j);
+      }
+    }
+  }
+
+  // Group by cluster root
+  const groups = new Map();
+  for (let i = 0; i < items.length; i++) {
+    const root = find(i);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(items[i].area);
+  }
+
+  // Only split if we get 2+ clusters with meaningful size (at least 3 settlements each)
+  const clusters = [...groups.values()].filter(g => g.length >= 3);
+  if (clusters.length < 2) return [areas];
+
+  // Don't split if one cluster dominates (>75% of total) — it's one massive event
+  const total = clusters.reduce((s, c) => s + c.length, 0);
+  if (clusters.some(c => c.length / total > 0.75)) return [areas];
+
+  return clusters;
+}
+
 // Determine which wave a settlement belongs to (0-based index, or -1 for early warning only)
 function getSettlementWaveIndex(settlement) {
   for (let i = eventWaves.length - 1; i >= 0; i--) {
@@ -1059,10 +1104,23 @@ async function fetchAlerts() {
 
         await updateEventMessage();
 
-        // Map with polygons + dots
-        const mapPath = await generateAlertMap(allAreas);
-        if (mapPath) {
-          await sendTelegramPhoto(mapPath, `📍 מפת התרעות - ${time} (${allAreas.length} ישובים)`);
+        // Map with polygons + dots — split into clusters if geographically distinct
+        const clusters = clusterSettlements(allAreas);
+        if (clusters.length >= 2) {
+          console.log(`[מפה] ${clusters.length} אשכולות גיאוגרפיים: ${clusters.map(c => c.length).join(", ")} ישובים`);
+          for (let ci = 0; ci < clusters.length; ci++) {
+            const clusterAreas = clusters[ci];
+            const clusterRegions = summarizeAreas(clusterAreas);
+            const mapPath = await generateAlertMap(clusterAreas);
+            if (mapPath) {
+              await sendTelegramPhoto(mapPath, `📍 ${clusterRegions} - ${time} (${clusterAreas.length} ישובים)`);
+            }
+          }
+        } else {
+          const mapPath = await generateAlertMap(allAreas);
+          if (mapPath) {
+            await sendTelegramPhoto(mapPath, `📍 מפת התרעות - ${time} (${allAreas.length} ישובים)`);
+          }
         }
 
         try {
