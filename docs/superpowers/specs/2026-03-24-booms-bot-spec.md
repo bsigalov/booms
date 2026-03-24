@@ -37,8 +37,17 @@ Each geographic event is an independent object in `activeEvents` Map with its ow
 ### States
 
 - **null** — no active event
-- **early_warning** — Oref sent an early warning alert (detection method TBD — pending analysis of raw Oref alert titles and categories from `/data/oref-raw-alerts.jsonl`)
-- **alert** — actual siren ("ירי רקטות וטילים", "חדירת כלי טיס עוין", etc.)
+- **early_warning** — Oref sent `cat=10` with title "בדקות הקרובות צפויות להתקבל התרעות באזורך"
+- **alert** — actual siren: `cat=1` "ירי רקטות וטילים", `cat=6` "חדירת כלי טיס עוין"
+- **ended** detection: `cat=10` with title "האירוע הסתיים"
+
+**Oref API categories (from raw data analysis 2026-03-24):**
+| cat | title | meaning |
+|---|---|---|
+| 1 | ירי רקטות וטילים | Rocket/missile siren |
+| 6 | חדירת כלי טיס עוין | Hostile aircraft siren |
+| 10 | בדקות הקרובות צפויות להתקבל התרעות באזורך | Early warning |
+| 10 | האירוע הסתיים | Event ended |
 - **waiting** — no new alerts for 2 minutes. **Only reachable from `alert`**, not from `early_warning`.
 - **ended** — Oref sent explicit "event ended" message, OR 20-minute safety timeout from `waiting` with no activity
 - **cleanup** — 15 minutes after ended, event removed from `activeEvents`
