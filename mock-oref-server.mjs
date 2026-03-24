@@ -2,7 +2,7 @@
 import { createServer } from "http";
 import { readFileSync } from "fs";
 
-const SIM_TOTAL_MS = 120000; // 2 minutes
+const MIN_WAVE_INTERVAL_MS = 5000; // minimum 5s between waves
 const scenarioPath = process.argv[2] || "/data/test-scenarios.json";
 const scenarioIndex = parseInt(process.argv[3] || "-1");
 
@@ -21,7 +21,15 @@ const scenario = scenarioIndex >= 0
 
 const waves = scenario.waves || [];
 const totalSettlements = waves.flat().length;
+
+// Calculate timing: 5s minimum between waves, total adapts to wave count
+const waveInterval = Math.max(MIN_WAVE_INTERVAL_MS, 8000); // 8s default, 5s minimum
+const waveWindowMs = waves.length > 1 ? waveInterval * (waves.length - 1) : 0;
+const totalMs = Math.max(60000, waveWindowMs + 30000); // waves + 30s for waiting/ended
+const alertDuration = Math.round(waveInterval * 0.6); // alert active for 60% of interval
+
 console.log(`[mock] scenario: "${scenario.title}" — ${totalSettlements} settlements, ${waves.length} waves`);
+console.log(`[mock] timing: ${waveInterval/1000}s between waves, ${Math.round(totalMs/1000)}s total`);
 
 let currentResponse = "";
 
@@ -36,13 +44,10 @@ server.listen(3333, () => {
 });
 
 function scheduleWaves() {
-  const waveWindow = SIM_TOTAL_MS * 0.55;
-  const waveInterval = waves.length > 1 ? waveWindow / (waves.length - 1) : 0;
-  const alertDuration = Math.max(3000, waveInterval * 0.7);
-
   waves.forEach((waveAreas, i) => {
-    const delay = Math.round(i * waveInterval);
+    const delay = i * waveInterval;
 
+    // Show alert
     setTimeout(() => {
       currentResponse = JSON.stringify({
         id: String(Date.now()),
@@ -54,12 +59,14 @@ function scheduleWaves() {
       console.log(`[mock] wave ${i + 1}/${waves.length} (t+${Math.round(delay/1000)}s): ${waveAreas.length} settlements`);
     }, delay);
 
+    // Clear alert after duration
     setTimeout(() => {
       currentResponse = "";
     }, delay + alertDuration);
   });
 
-  const endDelay = Math.round(SIM_TOTAL_MS * 0.7);
+  // End event 20s after last wave
+  const endDelay = waveWindowMs + 20000;
   setTimeout(() => {
     currentResponse = JSON.stringify({
       id: String(Date.now()),
@@ -71,13 +78,15 @@ function scheduleWaves() {
     console.log(`[mock] end event sent (t+${Math.round(endDelay/1000)}s)`);
   }, endDelay);
 
+  // Clear end event after 5s
   setTimeout(() => {
     currentResponse = "";
-  }, Math.round(SIM_TOTAL_MS * 0.75));
+  }, endDelay + 5000);
 
+  // Shutdown
   setTimeout(() => {
     console.log("[mock] replay complete, shutting down");
     server.close();
     process.exit(0);
-  }, SIM_TOTAL_MS);
+  }, totalMs);
 }
