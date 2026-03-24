@@ -946,6 +946,10 @@ async function sendTelegram(message, chatId = TELEGRAM_CHANNEL_ID, opts = {}) {
     };
     if (opts.replyMarkup) body.reply_markup = opts.replyMarkup;
     if (opts.threadId) body.message_thread_id = opts.threadId;
+    if (opts.replyToMsgId) {
+      body.reply_parameters = { message_id: opts.replyToMsgId };
+      if (opts.replyChatId) body.reply_parameters.chat_id = opts.replyChatId;
+    }
 
     // Edit existing message if messageId provided
     if (opts.editMessageId) {
@@ -1143,78 +1147,21 @@ async function updateEventMessage(evt) {
     const result = await sendTelegram(msg, TELEGRAM_CHANNEL_ID);
     if (result?.ok) {
       evt.lastTextMessageId = result.result.message_id;
-      // Look up the discussion thread for this channel post (real alerts only)
-      if (!simActive && TELEGRAM_DISCUSSION_ID && !evt.discussionThreadId) {
-        await resolveDiscussionThread(evt);
+      // Send boom button as first comment on new channel post
+      if (!simActive && TELEGRAM_DISCUSSION_ID) {
+        await sendBoomButtonToThread(evt);
       }
     }
   }
 }
 
-// After sending a channel post, resolve its discussion group thread ID
-// Uses Telegram's forwarded message matching in getUpdates
-async function resolveDiscussionThread(evt) {
-  console.log(`[discussion] resolving thread for channel msg ${evt.lastTextMessageId}, discussion_id=${TELEGRAM_DISCUSSION_ID}`);
-  try {
-    // Small delay to let Telegram create the auto-forwarded message
-    await new Promise(r => setTimeout(r, 2000));
-
-    // Poll for recent updates — look for the auto-forwarded message
-    const res = await fetch(`${TELEGRAM_API}/getUpdates?offset=${lastUpdateId + 1}&timeout=3`, {
-      signal: AbortSignal.timeout(8000),
-    });
-    const data = await res.json();
-    if (!data.ok || !data.result) {
-      console.log(`[discussion] getUpdates returned no data`);
-      return;
-    }
-
-    console.log(`[discussion] got ${data.result.length} updates to scan`);
-
-    for (const update of data.result) {
-      lastUpdateId = update.update_id;
-
-      // Log ALL update types for debugging
-      const keys = Object.keys(update).filter(k => k !== "update_id");
-      const msg = update.message || update.channel_post;
-      if (msg) {
-        const chatId_ = msg.chat?.id?.toString();
-        console.log(`[discussion] update: type=${keys.join(",")}, chat=${chatId_}, is_auto_fwd=${msg.is_automatic_forward}, sender_chat=${msg.sender_chat?.type}, fwd_origin=${msg.forward_origin?.type}, thread=${msg.message_thread_id}`);
-
-        if (chatId_ === TELEGRAM_DISCUSSION_ID) {
-          // Try any method to identify the auto-forwarded message
-          const fwdMsgId = msg.forward_from_message_id || msg.forward_origin?.message_id;
-          const threadId = msg.message_thread_id || msg.message_id;
-
-          if (fwdMsgId && (fwdMsgId == evt.lastTextMessageId || fwdMsgId == evt.lastMapMessageId)) {
-            evt.discussionThreadId = threadId;
-            console.log(`[discussion] MATCHED! thread=${threadId} for event "${evt.regionKey}" (fwd_msg=${fwdMsgId})`);
-            await sendBoomButtonToThread(evt);
-            return;
-          }
-
-          // Even if we can't match the specific message, use the thread_id if it's an auto-forward
-          if (msg.is_automatic_forward || msg.forward_origin?.type === "channel" || msg.sender_chat?.type === "channel") {
-            evt.discussionThreadId = threadId;
-            console.log(`[discussion] LINKED via auto-forward: thread=${threadId} for event "${evt.regionKey}"`);
-            await sendBoomButtonToThread(evt);
-            return;
-          }
-        }
-      }
-    }
-    console.log(`[discussion] thread not found for msg ${evt.lastTextMessageId} after scanning ${data.result.length} updates`);
-  } catch (e) {
-    console.warn(`[discussion] resolveThread error: ${e.message}`);
-  }
-}
-
-// Send boom button in discussion thread (called after thread is detected)
+// Send boom button as comment on channel post
 async function sendBoomButtonToThread(evt) {
-  if (!TELEGRAM_DISCUSSION_ID || !evt.discussionThreadId || evt.boomButtonMessageId) return;
+  if (!TELEGRAM_DISCUSSION_ID || !evt.lastTextMessageId || evt.boomButtonMessageId) return;
   const btnResult = await sendTelegram("💥 שמעתם בום? דווחו כאן:", TELEGRAM_DISCUSSION_ID, {
     replyMarkup: BOOM_BUTTONS,
-    threadId: evt.discussionThreadId,
+    replyToMsgId: evt.lastTextMessageId,
+    replyChatId: TELEGRAM_CHANNEL_ID,
   });
   if (btnResult?.ok) evt.boomButtonMessageId = btnResult.result.message_id;
 }
@@ -1259,7 +1206,12 @@ async function sendDiscussionUpdate(evt, updateType, details, alert = null) {
     msg += `\n📊 סיכום: ${evt.settlements.size} ישובים, ${evt.waves.length} גלים, ${min}:${String(sec).padStart(2, "0")} דקות`;
   }
 
-  const opts = evt.discussionThreadId ? { threadId: evt.discussionThreadId } : {};
+  // Reply to the channel post as a comment (cross-chat reply)
+  const opts = {};
+  if (evt.lastTextMessageId) {
+    opts.replyToMsgId = evt.lastTextMessageId;
+    opts.replyChatId = TELEGRAM_CHANNEL_ID;
+  }
   await sendTelegram(msg, TELEGRAM_DISCUSSION_ID, opts);
 }
 
@@ -1788,35 +1740,6 @@ async function pollTelegramCommands() {
 
     for (const update of data.result) {
       lastUpdateId = update.update_id;
-
-      // Detect auto-forwarded channel post in discussion group → link to event
-      const autoFwdMsg = update.message || update.channel_post;
-      if (autoFwdMsg && TELEGRAM_DISCUSSION_ID) {
-        const chatId_ = autoFwdMsg.chat?.id?.toString();
-        if (chatId_ === TELEGRAM_DISCUSSION_ID && autoFwdMsg.is_automatic_forward) {
-          const threadId = autoFwdMsg.message_thread_id || autoFwdMsg.message_id;
-          const fwdMsgId = autoFwdMsg.forward_from_message_id;
-          console.log(`[discussion] thread detected: ${threadId} (from channel msg ${fwdMsgId})`);
-
-          // Find which event this channel message belongs to
-          for (const [, evt] of activeEvents) {
-            if (evt.lastTextMessageId == fwdMsgId || evt.lastMapMessageId == fwdMsgId) {
-              evt.discussionThreadId = threadId;
-              for (const qMsg of evt.pendingDiscussionUpdates) {
-                await sendTelegram(qMsg, TELEGRAM_DISCUSSION_ID, { threadId });
-              }
-              evt.pendingDiscussionUpdates = [];
-              await sendBoomButtonToThread(evt);
-              console.log(`[discussion] linked thread ${threadId} to event "${evt.regionKey}"`);
-              break;
-            }
-          }
-          continue;
-        }
-        if (chatId_ === TELEGRAM_DISCUSSION_ID) {
-          console.log(`[discussion] update from group: type=${update.message ? "message" : "channel_post"}, is_auto_fwd=${autoFwdMsg.is_automatic_forward}, thread=${autoFwdMsg.message_thread_id}, sender_chat=${autoFwdMsg.sender_chat?.id}`);
-        }
-      }
 
       // Handle callback buttons (boom questionnaire)
       if (update.callback_query) {
