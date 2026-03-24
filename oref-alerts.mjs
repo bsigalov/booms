@@ -845,11 +845,12 @@ async function generateAlertMap(areas, evt = null) {
 
   // Choose zoom based on geographic span (degrees → zoom level)
   let zoom;
-  if (span < 0.02) zoom = 12;       // ~2km — single settlement
-  else if (span < 0.1) zoom = 11;   // ~10km — small cluster
-  else if (span < 0.3) zoom = 10;   // ~30km — city region
-  else if (span < 0.7) zoom = 9;    // ~70km — district
-  else zoom = 8;                     // >70km — large area
+  if (span < 0.03) zoom = 13;       // ~3km — single settlement
+  else if (span < 0.1) zoom = 12;   // ~10km — small cluster
+  else if (span < 0.25) zoom = 11;  // ~25km — city region
+  else if (span < 0.5) zoom = 10;   // ~50km — district
+  else if (span < 1.0) zoom = 9;    // ~100km — large area
+  else zoom = 8;                     // >100km — country scale
 
   const map = new StaticMaps({
     width: 800,
