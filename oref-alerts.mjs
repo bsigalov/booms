@@ -37,8 +37,9 @@ const activeEvents = new Map(); // regionKey → event object
 
 // Check if Oref alert is an early warning (vs actual siren)
 function isEarlyWarningAlert(alert) {
-  const t = (alert.title || "").toLowerCase();
-  return t.includes("התרעה מוקדמת") || t.includes("early warning");
+  const t = alert.title || "";
+  // Real Oref early warning: "בדקות הקרובות צפויות להתקבל התרעות באזורך" (cat=10)
+  return t.includes("בדקות הקרובות") || t.includes("התרעה מוקדמת");
 }
 
 function createEvent(regionKey, title, cat, settlements, time, protectionMin, alert) {
