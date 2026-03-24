@@ -929,9 +929,9 @@ async function generateAlertMap(areas, evt = null) {
     }
   };
 
-  // Render early warning settlements (orange)
+  // Render early warning settlements (orange) — always orange regardless of current phase
   for (const area of earlyWarningSettlements) {
-    renderSettlement(area, isEarlyWarning ? WAVE_COLORS.early_warning : WAVE_COLORS.waves[0]);
+    renderSettlement(area, WAVE_COLORS.early_warning);
   }
 
   // Render each wave with its color
