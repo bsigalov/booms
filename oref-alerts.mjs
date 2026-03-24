@@ -942,15 +942,26 @@ async function generateAlertMap(areas, evt = null) {
     }
   }
 
-  // Add home marker (blue dot)
-  map.addMarker({
-    coord: HOME_COORD,
-    img: HOME_MARKER_PATH,
-    height: 18,
-    width: 18,
-    offsetX: 9,
-    offsetY: 9,
-  });
+  // Add home marker (blue dot) only if within 80km of alert area
+  // Otherwise it pulls the map center away from the alerts
+  const alertCenterCoords = areas.map(a => fuzzyMatch(a) || CITY_COORDS[a]).filter(Boolean);
+  if (alertCenterCoords.length > 0) {
+    const alertCentroid = [
+      alertCenterCoords.reduce((s, c) => s + c[0], 0) / alertCenterCoords.length,
+      alertCenterCoords.reduce((s, c) => s + c[1], 0) / alertCenterCoords.length,
+    ];
+    const homeDistKm = haversineKm(HOME_COORD, alertCentroid);
+    if (homeDistKm <= 80) {
+      map.addMarker({
+        coord: HOME_COORD,
+        img: HOME_MARKER_PATH,
+        height: 18,
+        width: 18,
+        offsetX: 9,
+        offsetY: 9,
+      });
+    }
+  }
 
   try {
     await map.render();
