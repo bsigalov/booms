@@ -1251,7 +1251,7 @@ async function updateEventMessage(evt) {
 
 // Send update to the channel's discussion group (comment section)
 async function sendDiscussionUpdate(evt, updateType, details, alert = null) {
-  if (!TELEGRAM_DISCUSSION_ID || evt.isTest) return; // skip discussion updates for tests
+  if (!TELEGRAM_DISCUSSION_ID) return;
   const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
 
   let emoji, label;
