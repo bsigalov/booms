@@ -25,6 +25,7 @@ let eventStartTimeStr = null;
 let eventTitle = "";
 let eventType = ""; // alert.cat — for event grouping
 let eventSettlements = new Set();
+let currentWaveSettlements = new Set(); // settlements in current active wave (for map display)
 let eventWaves = []; // [{settlements: Set, time: string}] — ordered alert waves for coloring
 let eventHistory = []; // [{time, text}]
 let eventProtectionMin = 10; // parsed from desc
@@ -1038,6 +1039,7 @@ async function fetchAlerts() {
       if ((eventPhase === "early_warning" || eventPhase === "alert") && emptyCount >= emptyThreshold) {
         const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
         eventPhase = "waiting";
+        currentWaveSettlements = new Set(); // clear wave for next map
         eventHistory.push({ time, text: "🟡 ממתינים במרחב מוגן" });
         await updateEventMessage();
         return; // Don't check ended in same cycle — let protection time count from NOW
@@ -1098,6 +1100,13 @@ async function fetchAlerts() {
           eventHistory.push({ time, text: "🚨 אזעקות חודשו" });
         }
 
+        // Stale ended event — clean up so a fresh event starts
+        if (eventPhase === "ended") {
+          eventPhase = null;
+          lastTextMessageId = null;
+          lastMapMessageId = null;
+        }
+
         const isNew = eventPhase === null;
 
         if (isNew) {
@@ -1109,6 +1118,7 @@ async function fetchAlerts() {
           eventType = alert.cat;
           eventProtectionMin = parseProtectionMinutes(alert.desc);
           eventSettlements = new Set(alert.data);
+          currentWaveSettlements = new Set(alert.data);
           eventWaves = [];
           eventHistory = [{ time, text: `⚠️ התרעה מוקדמת: ${summarizeAreas(alert.data)} (${alert.data.length})` }];
           lastWaveTime = Date.now();
@@ -1128,7 +1138,10 @@ async function fetchAlerts() {
           eventWaves.push({ settlements: waveSettlements, time });
 
           const newSettlements = alert.data.filter(s => !eventSettlements.has(s));
-          for (const s of alert.data) eventSettlements.add(s);
+          for (const s of alert.data) {
+            eventSettlements.add(s);
+            currentWaveSettlements.add(s);
+          }
           lastWaveTime = Date.now();
 
           const newProt = parseProtectionMinutes(alert.desc);
@@ -1159,8 +1172,8 @@ async function fetchAlerts() {
 
         await updateEventMessage();
 
-        // Map shows CURRENT alert only (not cumulative history)
-        const mapAreas = alert.data;
+        // Map shows current active wave (accumulated since last "waiting" reset)
+        const mapAreas = [...currentWaveSettlements];
         const clusters = clusterSettlements(mapAreas);
         if (clusters.length >= 2) {
           console.log(`[מפה] ${clusters.length} אשכולות גיאוגרפיים: ${clusters.map(c => c.length).join(", ")} ישובים`);
