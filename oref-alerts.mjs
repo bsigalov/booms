@@ -1252,13 +1252,13 @@ async function fetchAlerts() {
         }
 
         // waiting → ended
-        if (evt.phase === "waiting" && evt.lastWaveTime) {
-          const protMin = simActive ? 0.5 : Math.max(evt.protectionMin, 3);
-          if (evt.emptyCount * POLL_INTERVAL > (protMin + 2) * 60000) {
+        if (evt.phase === "waiting") {
+          const safetyTimeoutMs = simActive ? 30000 : 20 * 60000;
+          if (evt.emptyCount * POLL_INTERVAL > safetyTimeoutMs) {
             const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
-            console.log(`[lifecycle][${key}] waiting → ended (protection=${protMin}min)`);
+            console.log(`[lifecycle][${key}] waiting → ended (20min safety timeout)`);
             evt.phase = "ended";
-            evt.history.push({ time, text: "✅ האירוע הסתיים" });
+            evt.history.push({ time, text: "✅ האירוע הסתיים (זמן המתנה מקסימלי)" });
             await updateEventMessage(evt);
             await sendDiscussionUpdate(evt, "ended", `ניתן לצאת מהמרחב המוגן.\nסה"כ ${evt.settlements.size} ישובים, ${evt.waves.length} גלים.`);
             if (!simActive) saveScenario(evt);
@@ -1312,6 +1312,24 @@ async function fetchAlerts() {
       const settlements = alert.data || [];
 
       console.log(`[alert][${mode}] NEW id=${alert.id} cat="${alert.cat}" title="${alert.title}" settlements=${settlements.length}: ${settlements.join(", ")}`);
+
+      // Detect Oref "event ended" message
+      const isEndEvent = alert.cat === "10" || (alert.title || "").includes("האירוע הסתיים");
+      if (isEndEvent) {
+        console.log(`[alert][${mode}] END EVENT detected: "${alert.title}"`);
+        for (const [key, evt] of activeEvents) {
+          if (evt.phase === "waiting" || evt.phase === "alert") {
+            const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
+            console.log(`[lifecycle][${key}] → ended (explicit Oref end event)`);
+            evt.phase = "ended";
+            evt.history.push({ time, text: "✅ האירוע הסתיים (פיקוד העורף)" });
+            await updateEventMessage(evt);
+            await sendDiscussionUpdate(evt, "ended", `פיקוד העורף הודיע: האירוע הסתיים.\nסה"כ ${evt.settlements.size} ישובים, ${evt.waves.length} גלים.`);
+            if (!evt.isTest) saveScenario(evt);
+          }
+        }
+        continue;
+      }
 
       // Find or create the right event for these settlements
       // Simulations always create fresh events (never merge with real)
