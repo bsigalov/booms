@@ -720,6 +720,7 @@ async function generateAlertMap(areas) {
     paddingX: 50,
     paddingY: 50,
     tileUrl: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    zoomRange: { min: 7, max: 15 }, // min 7 keeps Israel in frame, max 15 for detail
   });
 
   const isEarlyWarning = eventPhase === "early_warning";
@@ -1039,12 +1040,14 @@ async function fetchAlerts() {
         eventPhase = "waiting";
         eventHistory.push({ time, text: "🟡 ממתינים במרחב מוגן" });
         await updateEventMessage();
+        return; // Don't check ended in same cycle — let protection time count from NOW
       }
 
-      // waiting → ended (protection time expired)
+      // waiting → ended (protection time expired since entering waiting state)
       if (eventPhase === "waiting" && lastWaveTime) {
-        const protMin = simActive ? 0.5 : eventProtectionMin;
-        if (Date.now() - lastWaveTime > protMin * 60000) {
+        const protMin = simActive ? 0.5 : Math.max(eventProtectionMin, 3); // minimum 3 min in shelter
+        const waitingSince = Date.now() - emptyCount * POLL_INTERVAL; // approximate when waiting started
+        if (emptyCount * POLL_INTERVAL > (protMin + 2) * 60000) { // protMin + 2min buffer since last alert
           const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
           eventPhase = "ended";
           eventHistory.push({ time, text: "✅ האירוע הסתיים" });
@@ -1070,17 +1073,32 @@ async function fetchAlerts() {
         lastAlertId = alert.id;
         const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
 
-        // Different event type while active → end current event, start fresh
+        // Merge window: scale with event size (5 min base, up to 15 min for massive attacks)
+        const mergeWindowMs = Math.min(15, 5 + Math.floor(eventSettlements.size / 50)) * 60000;
+        const withinMergeWindow = lastWaveTime && (Date.now() - lastWaveTime < mergeWindowMs);
+
+        // Different event type while active — only end if outside merge window
         if (eventPhase && eventPhase !== "ended" && eventType && alert.cat !== eventType) {
-          eventHistory.push({ time, text: "✅ האירוע הסתיים" });
-          eventPhase = "ended";
-          await updateEventMessage();
-          eventPhase = null;
-          lastTextMessageId = null;
-          lastMapMessageId = null;
+          if (!withinMergeWindow) {
+            eventHistory.push({ time, text: "✅ האירוע הסתיים" });
+            eventPhase = "ended";
+            await updateEventMessage();
+            eventPhase = null;
+            lastTextMessageId = null;
+            lastMapMessageId = null;
+          } else {
+            eventType = alert.cat;
+            if (alert.title !== eventTitle) eventTitle = alert.title;
+          }
         }
 
-        const isNew = eventPhase === null || eventPhase === "ended";
+        // Reopen recently-ended event instead of creating new one
+        if (eventPhase === "ended" && withinMergeWindow) {
+          eventPhase = "alert";
+          eventHistory.push({ time, text: "🚨 אזעקות חודשו" });
+        }
+
+        const isNew = eventPhase === null;
 
         if (isNew) {
           // New event — early warning
@@ -1091,7 +1109,7 @@ async function fetchAlerts() {
           eventType = alert.cat;
           eventProtectionMin = parseProtectionMinutes(alert.desc);
           eventSettlements = new Set(alert.data);
-          eventWaves = []; // no waves yet — settlements are in early warning
+          eventWaves = [];
           eventHistory = [{ time, text: `⚠️ התרעה מוקדמת: ${summarizeAreas(alert.data)} (${alert.data.length})` }];
           lastWaveTime = Date.now();
           lastTextMessageId = null;
