@@ -63,9 +63,8 @@ function createEvent(regionKey, title, cat, settlements, time, protectionMin, al
     lastTextMessageId: null,
     lastMapMessageId: null,
     boomButtonMessageId: null,
-    discussionThreadId: null,
-    pendingDiscussionUpdates: [],
     emptyCount: 0,
+    isTest: simActive,
   };
 }
 
@@ -91,6 +90,8 @@ function findNearestEvent(settlements) {
   let nearestDist = Infinity;
   for (const [key, evt] of activeEvents) {
     if (evt.phase === "ended") continue;
+    // Never merge tests with real events or vice versa
+    if (evt.isTest !== simActive) continue;
     // Compute centroid of existing event
     const evtCoords = [];
     for (const s of evt.settlements) {
@@ -262,12 +263,14 @@ try {
 const WAVE_COLORS = {
   early_warning: { fill: "#FF980080", stroke: "#E65100" },  // orange
   waves: [
-    { fill: "#C6282899", stroke: "#B71C1C" },  // wave 1 — dark red
-    { fill: "#E5393580", stroke: "#C62828" },  // wave 2 — crimson
-    { fill: "#EF535070", stroke: "#D32F2F" },  // wave 3 — red
-    { fill: "#F4433660", stroke: "#E53935" },  // wave 4 — medium red
-    { fill: "#FF515150", stroke: "#EF5347" },  // wave 5 — light red
-    { fill: "#FF6E6E45", stroke: "#F44336" },  // wave 6 — pink-red
+    { fill: "#D32F2F90", stroke: "#B71C1C" },  // wave 1 — red
+    { fill: "#7B1FA290", stroke: "#4A148C" },  // wave 2 — purple
+    { fill: "#1565C090", stroke: "#0D47A1" },  // wave 3 — blue
+    { fill: "#00838F90", stroke: "#006064" },  // wave 4 — teal
+    { fill: "#2E7D3290", stroke: "#1B5E20" },  // wave 5 — green
+    { fill: "#E6510090", stroke: "#BF360C" },  // wave 6 — deep orange
+    { fill: "#AD145790", stroke: "#880E4F" },  // wave 7 — pink
+    { fill: "#4527A090", stroke: "#311B92" },  // wave 8 — deep purple
   ],
 };
 
@@ -1140,15 +1143,14 @@ function buildEventMessage(evt) {
 
 async function updateEventMessage(evt) {
   let msg = buildEventMessage(evt);
-  if (simActive) msg = `🧪 <b>[טסט]</b>\n${msg}`;
+  if (evt.isTest) msg = `🧪 <b>[טסט — אין להסתמך על הודעה זו]</b>\n${msg}`;
   if (evt.lastTextMessageId) {
     await sendTelegram(msg, TELEGRAM_CHANNEL_ID, { editMessageId: evt.lastTextMessageId });
   } else {
     const result = await sendTelegram(msg, TELEGRAM_CHANNEL_ID);
     if (result?.ok) {
       evt.lastTextMessageId = result.result.message_id;
-      // Send boom button as first comment on new channel post
-      if (!simActive && TELEGRAM_DISCUSSION_ID) {
+      if (!evt.isTest && TELEGRAM_DISCUSSION_ID) {
         await sendBoomButtonToThread(evt);
       }
     }
@@ -1168,7 +1170,7 @@ async function sendBoomButtonToThread(evt) {
 
 // Send update to the channel's discussion group (comment section)
 async function sendDiscussionUpdate(evt, updateType, details, alert = null) {
-  if (!TELEGRAM_DISCUSSION_ID || simActive) return; // skip discussion updates for tests
+  if (!TELEGRAM_DISCUSSION_ID || evt.isTest) return; // skip discussion updates for tests
   const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
 
   let emoji, label;
