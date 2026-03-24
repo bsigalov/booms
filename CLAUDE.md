@@ -9,6 +9,9 @@ The full specification is at `docs/superpowers/specs/2026-03-24-booms-bot-spec.m
 - **NEVER merge test events with real events.**
 - **`ended` events are FINAL.** No reopening. New alerts create new events.
 - **`waiting` is only reachable from `alert`**, not from `early_warning`.
+- **NEVER detect end events by `cat` number.** Only by explicit title "האירוע הסתיים". Cat numbers are alert types, not lifecycle signals.
+- **NEVER use substring matching for geocoding.** Only exact match or base-name-before-dash.
+- **After deploying, always verify container start time** — `az container create` may not restart if image tag is cached. Use `az container delete` + `az container create` to force.
 
 ## Architecture
 Single-file Node.js ESM application (`oref-alerts.mjs`). Runs as a long-lived process polling:
