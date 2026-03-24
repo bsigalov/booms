@@ -15,7 +15,10 @@ jobs:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Build image in ACR
-        run: az acr build --registry orefbotacr --image oref-bot:latest .
+        run: az acr build --registry orefbotacr --image oref-bot:${{ github.sha }} --image oref-bot:latest .
+
+      - name: Delete old container
+        run: az container delete --resource-group oref-bot-rg --name oref-bot --yes || true
 
       - name: Deploy container with persistent storage
         env:
@@ -27,7 +30,7 @@ jobs:
           az container create \
             --resource-group oref-bot-rg \
             --name oref-bot \
-            --image orefbotacr.azurecr.io/oref-bot:latest \
+            --image orefbotacr.azurecr.io/oref-bot:${{ github.sha }} \
             --registry-login-server orefbotacr.azurecr.io \
             --registry-username orefbotacr \
             --registry-password "$ACR_PASS" \
@@ -43,3 +46,18 @@ jobs:
             --azure-file-volume-account-key "$STORAGE_KEY" \
             --azure-file-volume-share-name oref-data \
             --azure-file-volume-mount-path /data
+
+      - name: Verify deployment
+        run: |
+          echo "Waiting for container to start..."
+          sleep 30
+          STATE=$(az container show --resource-group oref-bot-rg --name oref-bot --query "containers[0].instanceView.currentState.state" -o tsv)
+          IMAGE=$(az container show --resource-group oref-bot-rg --name oref-bot --query "containers[0].image" -o tsv)
+          echo "State: $STATE"
+          echo "Image: $IMAGE"
+          if [ "$STATE" != "Running" ]; then
+            echo "ERROR: Container is not running!"
+            az container logs --resource-group oref-bot-rg --name oref-bot || true
+            exit 1
+          fi
+          echo "Deployment verified successfully"
