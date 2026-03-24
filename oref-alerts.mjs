@@ -21,6 +21,7 @@ const SEEN_ID_TTL_MS = 300_000; // 5 min TTL
 let feedbackLog = [];
 let simActive = false;
 let simResponse = "";
+let lastUpdateId = 0; // shared between pollTelegramCommands and resolveDiscussionThread
 
 // Multi-event support: each geographic region can have its own active event
 const activeEvents = new Map(); // regionKey → event object
@@ -1120,7 +1121,59 @@ async function updateEventMessage(evt) {
     await sendTelegram(msg, TELEGRAM_CHANNEL_ID, { editMessageId: evt.lastTextMessageId });
   } else {
     const result = await sendTelegram(msg, TELEGRAM_CHANNEL_ID);
-    if (result?.ok) evt.lastTextMessageId = result.result.message_id;
+    if (result?.ok) {
+      evt.lastTextMessageId = result.result.message_id;
+      // Look up the discussion thread for this channel post
+      if (TELEGRAM_DISCUSSION_ID && !evt.discussionThreadId) {
+        await resolveDiscussionThread(evt);
+      }
+    }
+  }
+}
+
+// After sending a channel post, resolve its discussion group thread ID
+// Uses Telegram's forwarded message matching in getUpdates
+async function resolveDiscussionThread(evt) {
+  try {
+    // Small delay to let Telegram create the auto-forwarded message
+    await new Promise(r => setTimeout(r, 1500));
+
+    // Poll for recent updates — look for the auto-forwarded message
+    const res = await fetch(`${TELEGRAM_API}/getUpdates?offset=${lastUpdateId + 1}&timeout=2`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    const data = await res.json();
+    if (!data.ok || !data.result) return;
+
+    for (const update of data.result) {
+      lastUpdateId = update.update_id;
+      const msg = update.message;
+      if (!msg) continue;
+
+      const chatId_ = msg.chat?.id?.toString();
+      if (chatId_ !== TELEGRAM_DISCUSSION_ID) continue;
+
+      // Check multiple detection methods
+      const isAutoFwd = msg.is_automatic_forward;
+      const hasFwdOrigin = msg.forward_origin?.type === "channel";
+      const senderIsChannel = msg.sender_chat?.type === "channel";
+      const fwdMsgId = msg.forward_from_message_id || msg.forward_origin?.message_id;
+
+      console.log(`[discussion] candidate: msg_id=${msg.message_id}, thread=${msg.message_thread_id}, is_auto_fwd=${isAutoFwd}, fwd_origin=${hasFwdOrigin}, sender_chat=${senderIsChannel}, fwd_msg_id=${fwdMsgId}`);
+
+      if ((isAutoFwd || hasFwdOrigin || senderIsChannel) && fwdMsgId) {
+        // Check if this matches our channel post
+        if (fwdMsgId == evt.lastTextMessageId || fwdMsgId == evt.lastMapMessageId) {
+          evt.discussionThreadId = msg.message_thread_id || msg.message_id;
+          console.log(`[discussion] thread resolved: ${evt.discussionThreadId} for event "${evt.regionKey}"`);
+          await sendBoomButtonToThread(evt);
+          return;
+        }
+      }
+    }
+    console.log(`[discussion] thread not found for msg ${evt.lastTextMessageId}`);
+  } catch (e) {
+    console.warn(`[discussion] resolveThread error: ${e.message}`);
   }
 }
 
@@ -1619,7 +1672,6 @@ async function finishBoomReport(chatId, session) {
 
 // Listen for /test command via Telegram polling
 const TELEGRAM_UPDATES_URL = `${TELEGRAM_API}/getUpdates`;
-let lastUpdateId = 0;
 
 async function pollTelegramCommands() {
   try {
