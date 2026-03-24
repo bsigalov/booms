@@ -1143,7 +1143,7 @@ async function fetchAlerts() {
           }
         }
 
-        // Compute & cache risk
+        // Compute & cache risk (uses cumulative settlements for full picture)
         const allAreas = [...eventSettlements];
         const alertCoords = await resolveCoords(allAreas);
         const alertRegions = new Set();
@@ -1159,8 +1159,9 @@ async function fetchAlerts() {
 
         await updateEventMessage();
 
-        // Map with polygons + dots — split into clusters if geographically distinct
-        const clusters = clusterSettlements(allAreas);
+        // Map shows CURRENT alert only (not cumulative history)
+        const mapAreas = alert.data;
+        const clusters = clusterSettlements(mapAreas);
         if (clusters.length >= 2) {
           console.log(`[מפה] ${clusters.length} אשכולות גיאוגרפיים: ${clusters.map(c => c.length).join(", ")} ישובים`);
           for (let ci = 0; ci < clusters.length; ci++) {
@@ -1172,9 +1173,9 @@ async function fetchAlerts() {
             }
           }
         } else {
-          const mapPath = await generateAlertMap(allAreas);
+          const mapPath = await generateAlertMap(mapAreas);
           if (mapPath) {
-            await sendTelegramPhoto(mapPath, `📍 מפת התרעות - ${time} (${allAreas.length} ישובים)`);
+            await sendTelegramPhoto(mapPath, `📍 מפת התרעות - ${time} (${mapAreas.length} ישובים)`);
           }
         }
 
