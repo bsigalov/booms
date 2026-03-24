@@ -1239,8 +1239,8 @@ async function fetchAlerts() {
       for (const [key, evt] of activeEvents) {
         evt.emptyCount++;
 
-        // early_warning/alert → waiting
-        if ((evt.phase === "early_warning" || evt.phase === "alert") && evt.emptyCount >= emptyThreshold) {
+        // alert → waiting
+        if (evt.phase === "alert" && evt.emptyCount >= emptyThreshold) {
           const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
           console.log(`[lifecycle][${key}] ${evt.phase} → waiting (empty ${evt.emptyCount}/${emptyThreshold}), settlements=${evt.settlements.size}`);
           evt.phase = "waiting";
@@ -1263,6 +1263,16 @@ async function fetchAlerts() {
             await sendDiscussionUpdate(evt, "ended", `ניתן לצאת מהמרחב המוגן.\nסה"כ ${evt.settlements.size} ישובים, ${evt.waves.length} גלים.`);
             if (!simActive) saveScenario(evt);
           }
+        }
+
+        // early_warning with no follow-up alert → clean up after 20 min
+        if (evt.phase === "early_warning" && evt.emptyCount * POLL_INTERVAL > 20 * 60000) {
+          const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
+          console.log(`[lifecycle][${key}] early_warning → cleanup (20min timeout, no alert followed)`);
+          evt.phase = "ended";
+          evt.history.push({ time, text: "✅ ההתרעה הסתיימה (לא הוסלמה לאזעקה)" });
+          await updateEventMessage(evt);
+          await sendDiscussionUpdate(evt, "ended", `ההתרעה המוקדמת הסתיימה ללא אזעקה.`);
         }
 
         // Clean up old ended events (>15 min since ended)
