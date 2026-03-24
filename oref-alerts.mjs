@@ -1153,44 +1153,56 @@ async function updateEventMessage(evt) {
 // After sending a channel post, resolve its discussion group thread ID
 // Uses Telegram's forwarded message matching in getUpdates
 async function resolveDiscussionThread(evt) {
+  console.log(`[discussion] resolving thread for channel msg ${evt.lastTextMessageId}, discussion_id=${TELEGRAM_DISCUSSION_ID}`);
   try {
     // Small delay to let Telegram create the auto-forwarded message
-    await new Promise(r => setTimeout(r, 1500));
+    await new Promise(r => setTimeout(r, 2000));
 
     // Poll for recent updates — look for the auto-forwarded message
-    const res = await fetch(`${TELEGRAM_API}/getUpdates?offset=${lastUpdateId + 1}&timeout=2`, {
-      signal: AbortSignal.timeout(5000),
+    const res = await fetch(`${TELEGRAM_API}/getUpdates?offset=${lastUpdateId + 1}&timeout=3`, {
+      signal: AbortSignal.timeout(8000),
     });
     const data = await res.json();
-    if (!data.ok || !data.result) return;
+    if (!data.ok || !data.result) {
+      console.log(`[discussion] getUpdates returned no data`);
+      return;
+    }
+
+    console.log(`[discussion] got ${data.result.length} updates to scan`);
 
     for (const update of data.result) {
       lastUpdateId = update.update_id;
-      const msg = update.message;
-      if (!msg) continue;
 
-      const chatId_ = msg.chat?.id?.toString();
-      if (chatId_ !== TELEGRAM_DISCUSSION_ID) continue;
+      // Log ALL update types for debugging
+      const keys = Object.keys(update).filter(k => k !== "update_id");
+      const msg = update.message || update.channel_post;
+      if (msg) {
+        const chatId_ = msg.chat?.id?.toString();
+        console.log(`[discussion] update: type=${keys.join(",")}, chat=${chatId_}, is_auto_fwd=${msg.is_automatic_forward}, sender_chat=${msg.sender_chat?.type}, fwd_origin=${msg.forward_origin?.type}, thread=${msg.message_thread_id}`);
 
-      // Check multiple detection methods
-      const isAutoFwd = msg.is_automatic_forward;
-      const hasFwdOrigin = msg.forward_origin?.type === "channel";
-      const senderIsChannel = msg.sender_chat?.type === "channel";
-      const fwdMsgId = msg.forward_from_message_id || msg.forward_origin?.message_id;
+        if (chatId_ === TELEGRAM_DISCUSSION_ID) {
+          // Try any method to identify the auto-forwarded message
+          const fwdMsgId = msg.forward_from_message_id || msg.forward_origin?.message_id;
+          const threadId = msg.message_thread_id || msg.message_id;
 
-      console.log(`[discussion] candidate: msg_id=${msg.message_id}, thread=${msg.message_thread_id}, is_auto_fwd=${isAutoFwd}, fwd_origin=${hasFwdOrigin}, sender_chat=${senderIsChannel}, fwd_msg_id=${fwdMsgId}`);
+          if (fwdMsgId && (fwdMsgId == evt.lastTextMessageId || fwdMsgId == evt.lastMapMessageId)) {
+            evt.discussionThreadId = threadId;
+            console.log(`[discussion] MATCHED! thread=${threadId} for event "${evt.regionKey}" (fwd_msg=${fwdMsgId})`);
+            await sendBoomButtonToThread(evt);
+            return;
+          }
 
-      if ((isAutoFwd || hasFwdOrigin || senderIsChannel) && fwdMsgId) {
-        // Check if this matches our channel post
-        if (fwdMsgId == evt.lastTextMessageId || fwdMsgId == evt.lastMapMessageId) {
-          evt.discussionThreadId = msg.message_thread_id || msg.message_id;
-          console.log(`[discussion] thread resolved: ${evt.discussionThreadId} for event "${evt.regionKey}"`);
-          await sendBoomButtonToThread(evt);
-          return;
+          // Even if we can't match the specific message, use the thread_id if it's an auto-forward
+          if (msg.is_automatic_forward || msg.forward_origin?.type === "channel" || msg.sender_chat?.type === "channel") {
+            evt.discussionThreadId = threadId;
+            console.log(`[discussion] LINKED via auto-forward: thread=${threadId} for event "${evt.regionKey}"`);
+            await sendBoomButtonToThread(evt);
+            return;
+          }
         }
       }
     }
-    console.log(`[discussion] thread not found for msg ${evt.lastTextMessageId}`);
+    console.log(`[discussion] thread not found for msg ${evt.lastTextMessageId} after scanning ${data.result.length} updates`);
   } catch (e) {
     console.warn(`[discussion] resolveThread error: ${e.message}`);
   }
