@@ -784,16 +784,15 @@ async function generateAlertMap(areas) {
         });
       }
     } else {
-      // Render as small dot for settlements <10K or without boundary
+      // Render as circle area for settlements <10K (3km radius — visible at any zoom)
       const coord = fuzzyMatch(area) || CITY_COORDS[area];
       if (coord) {
-        map.addMarker({
+        map.addCircle({
           coord,
-          img: DOT_MARKER_PATH,
-          height: 10,
-          width: 10,
-          offsetX: 5,
-          offsetY: 5,
+          radius: 3000, // 3km in meters
+          color: colors.stroke,
+          fill: colors.fill,
+          width: 1,
         });
       }
     }
@@ -918,9 +917,24 @@ async function sendTelegramPhoto(filePath, caption, chatId = TELEGRAM_CHANNEL_ID
 
 // --- Event lifecycle helpers ---
 
-const BOOM_BUTTONS = { inline_keyboard: [[
+// Boom button — URL deep link transfers user to bot chat, callback_data as fallback
+let BOOM_BUTTONS = { inline_keyboard: [[
   { text: "💥 שמעתי בום!", callback_data: "fb_boom_start" },
 ]] };
+
+// Auto-detect bot username at startup → upgrade to URL button (opens bot chat directly)
+(async () => {
+  try {
+    const res = await fetch(`${TELEGRAM_API}/getMe`);
+    const data = await res.json();
+    if (data.ok && data.result.username) {
+      BOOM_BUTTONS = { inline_keyboard: [[
+        { text: "💥 שמעתי בום!", url: `https://t.me/${data.result.username}?start=boom` },
+      ]] };
+      console.log(`Bot username: @${data.result.username}`);
+    }
+  } catch {}
+})();
 
 function parseProtectionMinutes(desc) {
   const m = desc.match(/(\d+)\s*דקות/);
@@ -1439,6 +1453,15 @@ async function pollTelegramCommands() {
       const text = update.message?.text || update.message?.forward_text || "";
       const fwdText = update.message?.forward_from_chat ? text : "";
       const chatId = update.message?.chat?.id?.toString();
+
+      // Handle /start boom from any user (URL deep link from channel button)
+      if (text === "/start boom" || text === "/start boom ") {
+        startBoomSession(chatId);
+        const q = BOOM_QUESTIONS.intensity;
+        await sendTelegram(q.text, chatId, { replyMarkup: q.buttons });
+        continue;
+      }
+
       if (chatId !== TELEGRAM_CHAT_ID) continue;
 
       // Save forwarded messages for analysis
