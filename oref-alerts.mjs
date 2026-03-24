@@ -894,7 +894,7 @@ async function generateAlertMap(areas, evt = null) {
         console.log(`[map] "${area}" → CIRCLE at [${coord}] (${bd ? `pop=${bd.population}, no boundary` : "no boundary data"}, fill=${colors.fill})`);
         map.addCircle({
           coord,
-          radius: 3000, // 3km in meters
+          radius: 1000, // 1km in meters
           color: colors.stroke,
           fill: colors.fill,
           width: 1,
