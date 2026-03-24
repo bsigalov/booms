@@ -22,13 +22,15 @@ jobs:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
+          ACR_PASS: ${{ secrets.ACR_PASSWORD }}
         run: |
           az container create \
             --resource-group oref-bot-rg \
             --name oref-bot \
             --image orefbotacr.azurecr.io/oref-bot:latest \
             --registry-login-server orefbotacr.azurecr.io \
-            --acr-identity \
+            --registry-username orefbotacr \
+            --registry-password "$ACR_PASS" \
             --cpu 0.5 --memory 0.5 \
             --os-type Linux \
             --restart-policy Always \
