@@ -831,10 +831,10 @@ async function generateAlertMap(areas, evt = null) {
   const map = new StaticMaps({
     width: 800,
     height: 600,
-    paddingX: 50,
-    paddingY: 50,
+    paddingX: 80,
+    paddingY: 80,
     tileUrl: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-    zoomRange: { min: 7, max: 15 },
+    zoomRange: { min: 9, max: 14 },
   });
 
   const waves = evt ? evt.waves : [];
