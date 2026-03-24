@@ -1051,13 +1051,21 @@ function buildEventMessage() {
   return msg;
 }
 
+let boomButtonMessageId = null; // boom button message in discussion group
+
 async function updateEventMessage() {
   const msg = buildEventMessage();
   if (lastTextMessageId) {
-    await sendTelegram(msg, TELEGRAM_CHANNEL_ID, { editMessageId: lastTextMessageId, replyMarkup: BOOM_BUTTONS });
+    await sendTelegram(msg, TELEGRAM_CHANNEL_ID, { editMessageId: lastTextMessageId });
   } else {
-    const result = await sendTelegram(msg, TELEGRAM_CHANNEL_ID, { replyMarkup: BOOM_BUTTONS });
+    const result = await sendTelegram(msg, TELEGRAM_CHANNEL_ID);
     if (result?.ok) lastTextMessageId = result.result.message_id;
+
+    // Post boom button in discussion group (once per event, after first channel post)
+    if (TELEGRAM_DISCUSSION_ID && !boomButtonMessageId) {
+      const btnResult = await sendTelegram("💥 שמעתם בום? דווחו כאן:", TELEGRAM_DISCUSSION_ID, { replyMarkup: BOOM_BUTTONS });
+      if (btnResult?.ok) boomButtonMessageId = btnResult.result.message_id;
+    }
   }
 }
 
@@ -1237,6 +1245,7 @@ async function fetchAlerts() {
         lastWaveTime = Date.now();
         lastTextMessageId = null;
         lastMapMessageId = null;
+        boomButtonMessageId = null;
 
         await sendDiscussionUpdate("new", `התרעה מוקדמת באזורים: ${summarizeAreas(alert.data)}`, alert);
       } else {
