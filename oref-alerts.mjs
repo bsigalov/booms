@@ -737,15 +737,39 @@ async function generateAlertMap(areas) {
     }
   }
 
+  // Track already-rendered boundaries to avoid drawing the same polygon twice
+  // (e.g. "תל אביב - מרכז" and "תל אביב - דרום" both map to תל אביב polygon)
+  const renderedBoundaries = new Set();
+
+  // Find boundary data for a settlement, with fuzzy matching for subdivisions
+  const findBoundary = (area) => {
+    if (SETTLEMENT_BOUNDARIES[area]?.boundary) return SETTLEMENT_BOUNDARIES[area];
+    // Check if area name contains a boundary key: "אשקלון - דרום".includes("אשקלון")
+    // Also check if boundary key contains area: for shared base names
+    // Sort by longest key first to prefer more specific matches
+    const keys = Object.keys(SETTLEMENT_BOUNDARIES).sort((a, b) => b.length - a.length);
+    for (const k of keys) {
+      if (!SETTLEMENT_BOUNDARIES[k]?.boundary) continue;
+      // Extract base name before " - " separator for both sides
+      const areaBase = area.split(" - ")[0].trim();
+      const keyBase = k.split(" - ")[0].trim();
+      if (areaBase === keyBase || area.includes(k) || k.includes(area)) {
+        return SETTLEMENT_BOUNDARIES[k];
+      }
+    }
+    return null;
+  };
+
   // Render function: add polygon or dot for a settlement
   const renderSettlement = (area, colors) => {
-    // Check if we have boundary data for this settlement (>10K population)
-    const boundaryData = SETTLEMENT_BOUNDARIES[area];
-    // Also check partial match for subdivisions like "אשקלון - דרום" → "אשקלון"
-    const parentName = !boundaryData ? Object.keys(SETTLEMENT_BOUNDARIES).find(k => area.includes(k)) : null;
-    const bd = boundaryData || (parentName ? SETTLEMENT_BOUNDARIES[parentName] : null);
+    const bd = findBoundary(area);
 
     if (bd?.boundary && bd.population >= 10000) {
+      // Skip if this boundary was already rendered (e.g. Tel Aviv subdivisions)
+      const boundaryKey = bd.name || area;
+      if (renderedBoundaries.has(boundaryKey)) return;
+      renderedBoundaries.add(boundaryKey);
+
       // Render as filled polygon
       const geojson = bd.boundary;
       const rings = geojson.type === "MultiPolygon"
@@ -895,8 +919,7 @@ async function sendTelegramPhoto(filePath, caption, chatId = TELEGRAM_CHANNEL_ID
 // --- Event lifecycle helpers ---
 
 const BOOM_BUTTONS = { inline_keyboard: [[
-  { text: "💥 בום!", callback_data: "fb_boom" },
-  { text: "💥💥 חזק!", callback_data: "fb_boom_strong" },
+  { text: "💥 שמעתי בום!", callback_data: "fb_boom" },
 ]] };
 
 function parseProtectionMinutes(desc) {
