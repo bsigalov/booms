@@ -1316,14 +1316,7 @@ async function fetchAlerts() {
         const withinMerge = evt.lastWaveTime && (now - evt.lastWaveTime < mergeWindowMs);
         console.log(`[alert] matched event "${nearest.key}" (dist=${nearest.dist.toFixed(0)}km, merge=${withinMerge})`);
 
-        // Reopen ended event if within merge window
-        if (evt.phase === "ended" && withinMerge) {
-          console.log(`[lifecycle][${nearest.key}] ended → alert (reopened)`);
-          evt.phase = "alert";
-          evt.history.push({ time, text: "🚨 אזעקות חודשו" });
-        }
-
-        // If ended and outside merge window, treat as new event
+        // If ended, always treat as new event (ended events are final)
         if (evt.phase === "ended") {
           console.log(`[lifecycle][${nearest.key}] ended → removing, creating fresh`);
           activeEvents.delete(nearest.key);
