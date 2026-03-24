@@ -1609,6 +1609,26 @@ async function pollTelegramCommands() {
     for (const update of data.result) {
       lastUpdateId = update.update_id;
 
+      // Detect auto-forwarded channel post in discussion group (any update type)
+      const autoFwdMsg = update.message || update.channel_post;
+      if (autoFwdMsg && TELEGRAM_DISCUSSION_ID) {
+        const chatId_ = autoFwdMsg.chat?.id?.toString();
+        if (chatId_ === TELEGRAM_DISCUSSION_ID && autoFwdMsg.is_automatic_forward) {
+          discussionThreadId = autoFwdMsg.message_thread_id || autoFwdMsg.message_id;
+          console.log(`[discussion] thread detected: ${discussionThreadId} (from channel msg ${autoFwdMsg.forward_from_message_id})`);
+          for (const qMsg of pendingDiscussionUpdates) {
+            await sendTelegram(qMsg, TELEGRAM_DISCUSSION_ID, { threadId: discussionThreadId });
+          }
+          pendingDiscussionUpdates = [];
+          await sendBoomButtonToThread();
+          continue;
+        }
+        // Log any message from discussion group for debugging
+        if (chatId_ === TELEGRAM_DISCUSSION_ID) {
+          console.log(`[discussion] update from group: type=${update.message ? "message" : "channel_post"}, is_auto_fwd=${autoFwdMsg.is_automatic_forward}, thread=${autoFwdMsg.message_thread_id}, sender_chat=${autoFwdMsg.sender_chat?.id}`);
+        }
+      }
+
       // Handle callback buttons (boom questionnaire)
       if (update.callback_query) {
         const cb = update.callback_query;
@@ -1640,23 +1660,7 @@ async function pollTelegramCommands() {
         continue;
       }
 
-      // Detect auto-forwarded channel post in discussion group → save thread ID
       const umsg = update.message;
-      if (umsg?.is_automatic_forward && umsg?.chat?.id?.toString() === TELEGRAM_DISCUSSION_ID) {
-        discussionThreadId = umsg.message_thread_id || umsg.message_id;
-        console.log(`[discussion] thread detected: ${discussionThreadId} (from channel msg ${umsg.forward_from_message_id})`);
-
-        // Flush queued updates into the thread
-        for (const qMsg of pendingDiscussionUpdates) {
-          await sendTelegram(qMsg, TELEGRAM_DISCUSSION_ID, { threadId: discussionThreadId });
-        }
-        pendingDiscussionUpdates = [];
-
-        // Send boom button
-        await sendBoomButtonToThread();
-        continue;
-      }
-
       const text = umsg?.text || umsg?.forward_text || "";
       const fwdText = umsg?.forward_from_chat ? text : "";
       const chatId = umsg?.chat?.id?.toString();
