@@ -1314,7 +1314,7 @@ async function fetchAlerts() {
       console.log(`[alert][${mode}] NEW id=${alert.id} cat="${alert.cat}" title="${alert.title}" settlements=${settlements.length}: ${settlements.join(", ")}`);
 
       // Detect Oref "event ended" message
-      const isEndEvent = alert.cat === "10" || (alert.title || "").includes("האירוע הסתיים");
+      const isEndEvent = (alert.title || "").includes("האירוע הסתיים");
       if (isEndEvent) {
         console.log(`[alert][${mode}] END EVENT detected: "${alert.title}"`);
         for (const [key, evt] of activeEvents) {
