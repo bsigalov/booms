@@ -743,15 +743,39 @@ async function ensureMarkers() {
 
 // Resolve areas to coordinates
 async function resolveCoords(areas) {
-  const coords = [];
+  const coordMap = new Map();
   const missed = [];
   for (const area of areas) {
     const coord = await geocode(area);
-    if (coord) coords.push(coord);
+    if (coord) coordMap.set(area, coord);
     else missed.push(area);
   }
-  console.log(`[resolveCoords] ${coords.length}/${areas.length} resolved${missed.length > 0 ? `, MISSING: ${missed.join(", ")}` : ""}`);
-  return coords;
+  console.log(`[resolveCoords] ${coordMap.size}/${areas.length} resolved${missed.length > 0 ? `, MISSING: ${missed.join(", ")}` : ""}`);
+
+  // Outlier detection: exclude settlements >3 std devs from centroid
+  if (coordMap.size >= 3) {
+    const coords = [...coordMap.values()];
+    const centroid = [
+      coords.reduce((s, c) => s + c[0], 0) / coords.length,
+      coords.reduce((s, c) => s + c[1], 0) / coords.length,
+    ];
+    const distances = coords.map(c => haversineKm(centroid, c));
+    const mean = distances.reduce((s, d) => s + d, 0) / distances.length;
+    const stdDev = Math.sqrt(distances.reduce((s, d) => s + (d - mean) ** 2, 0) / distances.length);
+
+    if (stdDev > 0) {
+      const threshold = mean + 3 * stdDev;
+      for (const [area, coord] of coordMap) {
+        const dist = haversineKm(centroid, coord);
+        if (dist > threshold) {
+          console.warn(`[geocode:outlier] "${area}" at [${coord}] is ${dist.toFixed(0)}km from centroid (threshold: ${threshold.toFixed(0)}km) — excluded from map`);
+          coordMap.delete(area);
+        }
+      }
+    }
+  }
+
+  return [...coordMap.values()];
 }
 
 // Cluster detection: split settlements into geographically distinct groups
