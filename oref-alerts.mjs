@@ -26,18 +26,28 @@ let lastUpdateId = 0; // shared between pollTelegramCommands and resolveDiscussi
 // Multi-event support: each geographic region can have its own active event
 const activeEvents = new Map(); // regionKey → event object
 
-function createEvent(regionKey, title, cat, settlements, time, protectionMin) {
+// Check if Oref alert is an early warning (vs actual siren)
+function isEarlyWarningAlert(alert) {
+  const t = (alert.title || "").toLowerCase();
+  return t.includes("התרעה מוקדמת") || t.includes("early warning");
+}
+
+function createEvent(regionKey, title, cat, settlements, time, protectionMin, alert) {
+  const earlyWarn = isEarlyWarningAlert(alert);
+  const phase = earlyWarn ? "early_warning" : "alert";
+  const emoji = earlyWarn ? "⚠️" : "🚨";
+  const label = earlyWarn ? "התרעה מוקדמת" : "אזעקה";
   return {
     regionKey,
-    phase: "early_warning",
+    phase,
     startTime: Date.now(),
     startTimeStr: time,
     title,
     type: cat,
     settlements: new Set(settlements),
     currentWaveSettlements: new Set(settlements),
-    waves: [],
-    history: [{ time, text: `⚠️ התרעה מוקדמת: ${summarizeAreas(settlements)} (${settlements.length})` }],
+    waves: earlyWarn ? [] : [{ settlements: new Set(settlements), time }],
+    history: [{ time, text: `${emoji} ${label}: ${summarizeAreas(settlements)} (${settlements.length})` }],
     protectionMin: protectionMin,
     riskMsg: "",
     lastWaveTime: Date.now(),
@@ -1275,6 +1285,7 @@ async function fetchAlerts() {
             evt.history.push({ time, text: "✅ האירוע הסתיים" });
             await updateEventMessage(evt);
             await sendDiscussionUpdate(evt, "ended", `ניתן לצאת מהמרחב המוגן.\nסה"כ ${evt.settlements.size} ישובים, ${evt.waves.length} גלים.`);
+            if (!simActive) saveScenario(evt);
           }
         }
 
@@ -1292,6 +1303,15 @@ async function fetchAlerts() {
     const alerts = Array.isArray(parsed) ? parsed : [parsed];
     const mode = simActive ? "TEST" : "REAL";
     console.log(`[alert][${mode}] received ${alerts.length} alert(s), active events: ${activeEvents.size}`);
+
+    // Save raw Oref data for debugging
+    if (!simActive) {
+      try {
+        appendFileSync("/tmp/oref-raw-alerts.jsonl", JSON.stringify({
+          timestamp: new Date().toISOString(), raw: parsed,
+        }) + "\n");
+      } catch {}
+    }
 
     const now = Date.now();
     for (const [id, ts] of seenAlertIds) {
@@ -1337,12 +1357,13 @@ async function fetchAlerts() {
       if (!evt) {
         // Create new event
         const regionKey = summarizeAreas(settlements).slice(0, 40);
-        evt = createEvent(regionKey, alert.title, alert.cat, settlements, time, parseProtectionMinutes(alert.desc));
+        evt = createEvent(regionKey, alert.title, alert.cat, settlements, time, parseProtectionMinutes(alert.desc), alert);
         activeEvents.set(regionKey, evt);
-        console.log(`[lifecycle][${regionKey}] NEW EVENT: "${alert.title}", ${settlements.length} settlements`);
+        const isEW = evt.phase === "early_warning";
+        console.log(`[lifecycle][${regionKey}] NEW EVENT [${isEW ? "EARLY_WARNING" : "ALERT"}]: "${alert.title}", ${settlements.length} settlements`);
 
         await updateEventMessage(evt);
-        await sendDiscussionUpdate(evt, "new", `התרעה מוקדמת באזורים: ${summarizeAreas(settlements)}`, alert);
+        await sendDiscussionUpdate(evt, "new", `${isEW ? "התרעה מוקדמת" : "אזעקה"} באזורים: ${summarizeAreas(settlements)}`, alert);
 
         // Generate map for new event
         const mapPath = await generateAlertMap(settlements, evt);
@@ -1354,9 +1375,11 @@ async function fetchAlerts() {
 
       // Update existing event
       const wasEarlyWarning = evt.phase === "early_warning";
+      const thisIsAlert = !isEarlyWarningAlert(alert); // actual alert vs early warning
       let resumedFromWaiting = false;
-      if (wasEarlyWarning) {
-        console.log(`[lifecycle][${evt.regionKey}] early_warning → alert`);
+
+      if (wasEarlyWarning && thisIsAlert) {
+        console.log(`[lifecycle][${evt.regionKey}] early_warning → alert (real siren)`);
         evt.phase = "alert";
       }
       if (evt.phase === "waiting") {
@@ -1380,14 +1403,18 @@ async function fetchAlerts() {
       if (newProt > evt.protectionMin) evt.protectionMin = newProt;
       if (alert.title !== evt.title) evt.title = alert.title;
 
-      console.log(`[lifecycle][${evt.regionKey}] wave ${evt.waves.length}: +${newSettlements.length} new (${evt.settlements.size} total)`);
+      // Use correct emoji/label based on Oref data
+      const emoji = thisIsAlert ? "🚨" : "⚠️";
+      const label = thisIsAlert ? "אזעקה" : "התרעה מוקדמת";
+
+      console.log(`[lifecycle][${evt.regionKey}] wave ${evt.waves.length} [${label}]: +${newSettlements.length} new (${evt.settlements.size} total)`);
 
       if (newSettlements.length > 0) {
         const list = newSettlements.slice(0, 5).join(", ");
         const more = newSettlements.length > 5 ? ` ועוד ${newSettlements.length - 5}` : "";
-        evt.history.push({ time, text: `🚨 התרחבות: ${list}${more} (${evt.settlements.size} סה"כ)` });
+        evt.history.push({ time, text: `${emoji} ${label} — התרחבות: ${list}${more} (${evt.settlements.size} סה"כ)` });
       } else {
-        evt.history.push({ time, text: `🚨 אזעקה: ${summarizeAreas(settlements)}` });
+        evt.history.push({ time, text: `${emoji} ${label}: ${summarizeAreas(settlements)}` });
       }
 
       // Risk analysis
@@ -1437,99 +1464,154 @@ async function fetchAlerts() {
   }
 }
 
-// Test alert scenarios
-const TEST_SCENARIOS = [
-  {
-    title: "ירי רקטות וטילים",
-    desc: "היכנסו למרחב המוגן ושהו בו 10 דקות",
-    areas: ["אשקלון - דרום", "אשקלון - צפון", "קריית גת", "שדרות", "נתיבות", "יד מרדכי", "זיקים", "כרמיה", "ברור חיל", "נגבה", "גברעם"],
-  },
-  {
-    title: "ירי רקטות וטילים",
-    desc: "היכנסו למרחב המוגן ושהו בו 10 דקות",
-    areas: ["תל אביב - מרכז העיר", "תל אביב - דרום העיר", "רמת גן", "גבעתיים", "חולון", "בת ים", "ראשון לציון", "הרצליה", "רעננה"],
-  },
-  {
-    title: "ירי רקטות וטילים",
-    desc: "היכנסו למרחב המוגן ושהו בו דקה וחצי",
-    areas: ["קריית שמונה", "מטולה", "דפנה", "שאר ישוב", "כפר גלעדי", "מרגליות", "שדה נחמיה", "כפר יובל"],
-  },
-  {
-    title: "ירי רקטות וטילים",
-    desc: "היכנסו למרחב המוגן ושהו בו 10 דקות",
-    areas: ["חיפה", "קריית אתא", "קריית ביאליק", "קריית ים", "נשר", "טירת כרמל", "עכו", "נהריה"],
-  },
-  {
-    title: "חדירת כלי טיס עוין",
-    desc: "היכנסו למרחב המוגן ושהו בו 10 דקות",
-    areas: ["ירושלים", "בית שמש", "מודיעין-מכבים-רעות", "רחובות", "אשדוד", "לוד", "רמלה"],
-  },
-];
+// Test scenarios — persistent file stores the 10 biggest real events
+const TEST_SCENARIOS_PATH = new URL("./test-scenarios.json", import.meta.url);
+const MAX_SCENARIOS = 10;
 
-// Simulation: split areas into waves and schedule over 3 minutes
+let TEST_SCENARIOS = [];
+try {
+  TEST_SCENARIOS = JSON.parse(readFileSync(TEST_SCENARIOS_PATH, "utf8"));
+  console.log(`נטענו ${TEST_SCENARIOS.length} תסריטי בדיקה`);
+} catch {
+  // Seed with built-in scenarios
+  TEST_SCENARIOS = [
+    {
+      title: "ירי רקטות וטילים", desc: "היכנסו למרחב המוגן ושהו בו 10 דקות",
+      waves: [
+        ["אשקלון - דרום", "אשקלון - צפון", "שדרות", "נתיבות"],
+        ["קריית גת", "יד מרדכי", "זיקים", "כרמיה"],
+        ["ברור חיל", "נגבה", "גברעם"],
+      ],
+    },
+    {
+      title: "ירי רקטות וטילים", desc: "היכנסו למרחב המוגן ושהו בו 10 דקות",
+      waves: [
+        ["תל אביב - מרכז העיר", "תל אביב - דרום העיר", "רמת גן"],
+        ["גבעתיים", "חולון", "בת ים"],
+        ["ראשון לציון", "הרצליה", "רעננה"],
+      ],
+    },
+    {
+      title: "ירי רקטות וטילים", desc: "היכנסו למרחב המוגן ושהו בו דקה וחצי",
+      waves: [
+        ["קריית שמונה", "מטולה", "דפנה"],
+        ["שאר ישוב", "כפר גלעדי", "מרגליות"],
+        ["שדה נחמיה", "כפר יובל"],
+      ],
+    },
+    {
+      title: "ירי רקטות וטילים", desc: "היכנסו למרחב המוגן ושהו בו 10 דקות",
+      waves: [
+        ["חיפה", "קריית אתא", "קריית ביאליק"],
+        ["קריית ים", "נשר", "טירת כרמל"],
+        ["עכו", "נהריה"],
+      ],
+    },
+    {
+      title: "חדירת כלי טיס עוין", desc: "היכנסו למרחב המוגן ושהו בו 10 דקות",
+      waves: [
+        ["ירושלים", "בית שמש", "מודיעין-מכבים-רעות"],
+        ["רחובות", "אשדוד"],
+        ["לוד", "רמלה"],
+      ],
+    },
+  ];
+}
+
+// Save a real event as a test scenario (auto-called when events end)
+function saveScenario(evt) {
+  if (evt.waves.length < 2) return; // too small
+  const totalSettlements = [...new Set(evt.waves.flatMap(w => [...w.settlements]))];
+  if (totalSettlements.length < 10) return; // too small
+
+  const scenario = {
+    title: evt.title,
+    desc: `היכנסו למרחב המוגן ושהו בו ${evt.protectionMin} דקות`,
+    waves: evt.waves.map(w => [...w.settlements]),
+    savedAt: new Date().toISOString(),
+    settlementCount: totalSettlements.length,
+  };
+
+  // Check for duplicate (same settlements)
+  const key = totalSettlements.sort().join(",");
+  const isDupe = TEST_SCENARIOS.some(s => {
+    const sKey = (s.waves || []).flat().sort().join(",");
+    return sKey === key;
+  });
+  if (isDupe) return;
+
+  TEST_SCENARIOS.push(scenario);
+  // Sort by settlement count descending, keep top MAX_SCENARIOS
+  TEST_SCENARIOS.sort((a, b) => (b.settlementCount || b.waves?.flat().length || 0) - (a.settlementCount || a.waves?.flat().length || 0));
+  if (TEST_SCENARIOS.length > MAX_SCENARIOS) {
+    TEST_SCENARIOS = TEST_SCENARIOS.slice(0, MAX_SCENARIOS);
+  }
+
+  try {
+    writeFileSync(TEST_SCENARIOS_PATH, JSON.stringify(TEST_SCENARIOS, null, 2));
+    console.log(`[scenarios] saved "${evt.title}" (${totalSettlements.length} settlements, ${evt.waves.length} waves). Total: ${TEST_SCENARIOS.length} scenarios`);
+  } catch (e) {
+    console.error(`[scenarios] save error: ${e.message}`);
+  }
+}
+
+// Simulation: replay real scenarios compressed to ~2 minutes
+const SIM_TOTAL_MS = 120000; // 2 minutes total
 let simTimers = [];
 
 function startSimulation() {
   if (simActive) return;
 
   const scenario = TEST_SCENARIOS[Math.floor(Math.random() * TEST_SCENARIOS.length)];
-  const areas = [...scenario.areas];
-
-  // Split into 3 waves
-  const w1 = Math.ceil(areas.length / 3);
-  const w2 = Math.ceil((areas.length - w1) / 2);
-  const waves = [
-    areas.slice(0, w1),
-    areas.slice(w1, w1 + w2),
-    areas.slice(w1 + w2),
-  ].filter(w => w.length > 0);
+  const waves = scenario.waves || [];
+  const totalSettlements = waves.flat().length;
 
   simActive = true;
-  console.log(`[סימולציה] ${scenario.title} — ${areas.length} ישובים ב-${waves.length} גלים`);
+  console.log(`[sim] ${scenario.title} — ${totalSettlements} settlements, ${waves.length} waves`);
 
   sendTelegram(
     `🧪 <b>סימולציה מתחילה</b>\n` +
     `📋 ${scenario.title}\n` +
-    `👥 ${areas.length} ישובים ב-${waves.length} גלים\n` +
-    `⏱ משך: 3 דקות\n\n` +
+    `👥 ${totalSettlements} ישובים ב-${waves.length} גלים\n` +
+    `⏱ משך: 2 דקות\n\n` +
     `⚠️ התרעות אמיתיות לא ייקלטו בזמן הסימולציה`,
     TELEGRAM_CHAT_ID
   );
 
-  // Wave timing: t=0, t=30s, t=60s
-  // Clear at t=80s → waiting after 15s → ended after 30s protection
-  // Total: ~2.5 min
+  // Spread waves evenly across first 60% of the 2 min window
+  const waveWindow = SIM_TOTAL_MS * 0.6; // 72s for waves
+  const waveInterval = waves.length > 1 ? waveWindow / (waves.length - 1) : 0;
+
   waves.forEach((waveAreas, i) => {
-    const delay = i * 30000;
+    const delay = Math.round(i * waveInterval);
     const timer = setTimeout(() => {
       simResponse = JSON.stringify({
         id: `sim-${Date.now()}`,
         cat: "1",
-        title: scenario.title,
+        title: `🧪 ${scenario.title}`,
         desc: scenario.desc,
         data: waveAreas,
       });
-      console.log(`[סימולציה] גל ${i + 1}/${waves.length}: ${waveAreas.join(", ")}`);
+      console.log(`[sim] wave ${i + 1}/${waves.length} (t+${Math.round(delay/1000)}s): ${waveAreas.length} settlements`);
     }, delay);
     simTimers.push(timer);
   });
 
-  // Clear alert → triggers waiting → ended
-  const clearTimer = setTimeout(() => {
+  // Clear alert at 70% → triggers waiting
+  const clearDelay = Math.round(SIM_TOTAL_MS * 0.7);
+  simTimers.push(setTimeout(() => {
     simResponse = "";
-    console.log("[סימולציה] ניקוי — ממתין לשלבי המתנה וסיום");
-  }, 80000);
-  simTimers.push(clearTimer);
+    console.log(`[sim] cleared (t+${Math.round(clearDelay/1000)}s) — waiting for shelter + end`);
+  }, clearDelay));
 
-  // End simulation after all phases complete
-  const endTimer = setTimeout(() => {
+  // End simulation at 100%
+  simTimers.push(setTimeout(() => {
     simActive = false;
     simResponse = "";
     simTimers = [];
-    console.log("[סימולציה] הסתיימה");
+    console.log("[sim] done");
     sendTelegram("🧪 הסימולציה הסתיימה — חזרה למצב אמיתי", TELEGRAM_CHAT_ID);
-  }, 140000);
-  simTimers.push(endTimer);
+  }, SIM_TOTAL_MS));
 }
 
 function stopSimulation() {
