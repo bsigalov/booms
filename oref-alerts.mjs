@@ -1215,6 +1215,35 @@ async function updateEventMessage(evt) {
     const result = await sendTelegram(msg, TELEGRAM_CHANNEL_ID);
     if (result?.ok) {
       evt.lastTextMessageId = result.result.message_id;
+
+      // Detect discussion thread for this channel post
+      if (!evt.isTest && TELEGRAM_DISCUSSION_ID) {
+        await new Promise(r => setTimeout(r, 2000));
+        try {
+          const updRes = await fetch(`${TELEGRAM_API}/getUpdates?offset=${lastUpdateId + 1}&timeout=3`, {
+            signal: AbortSignal.timeout(6000),
+          });
+          const updData = await updRes.json();
+          if (updData.ok && updData.result) {
+            for (const upd of updData.result) {
+              lastUpdateId = upd.update_id;
+              const m = upd.message;
+              if (!m) continue;
+              const cid = m.chat?.id?.toString();
+              if (cid === TELEGRAM_DISCUSSION_ID) {
+                evt.discussionThreadId = m.message_thread_id || m.message_id;
+                console.log(`[discussion] thread found: ${evt.discussionThreadId} (msg=${m.message_id}, is_auto_fwd=${m.is_automatic_forward}, sender=${m.sender_chat?.type})`);
+                break;
+              }
+            }
+          }
+          if (!evt.discussionThreadId) {
+            console.log(`[discussion] thread NOT found after scanning updates`);
+          }
+        } catch (e) {
+          console.warn(`[discussion] thread detection failed: ${e.message}`);
+        }
+      }
     }
   }
 }
@@ -1259,21 +1288,25 @@ async function sendDiscussionUpdate(evt, updateType, details, alert = null) {
     msg += `\n📊 סיכום: ${evt.settlements.size} ישובים, ${evt.waves.length} גלים, ${min}:${String(sec).padStart(2, "0")} דקות`;
   }
 
-  // Reply to the channel post as a comment (cross-chat reply)
+  // Use thread ID if detected, otherwise cross-chat reply as fallback
   const opts = {};
-  if (evt.lastTextMessageId) {
+  if (evt.discussionThreadId) {
+    opts.threadId = evt.discussionThreadId;
+  } else if (evt.lastTextMessageId) {
     opts.replyToMsgId = evt.lastTextMessageId;
     opts.replyChatId = TELEGRAM_CHANNEL_ID;
   }
   await sendTelegram(msg, TELEGRAM_DISCUSSION_ID, opts);
 
-  // Post boom button after every comment
-  if (evt.lastTextMessageId && BOOM_BUTTONS) {
-    await sendTelegram("💥 שמעתם בום? דווחו כאן:", TELEGRAM_DISCUSSION_ID, {
-      replyMarkup: BOOM_BUTTONS,
-      replyToMsgId: evt.lastTextMessageId,
-      replyChatId: TELEGRAM_CHANNEL_ID,
-    });
+  if (BOOM_BUTTONS) {
+    const boomOpts = { replyMarkup: BOOM_BUTTONS };
+    if (evt.discussionThreadId) {
+      boomOpts.threadId = evt.discussionThreadId;
+    } else if (evt.lastTextMessageId) {
+      boomOpts.replyToMsgId = evt.lastTextMessageId;
+      boomOpts.replyChatId = TELEGRAM_CHANNEL_ID;
+    }
+    await sendTelegram("💥 שמעתם בום? דווחו כאן:", TELEGRAM_DISCUSSION_ID, boomOpts);
   }
 }
 
