@@ -1026,14 +1026,21 @@ async function sendTelegram(message, chatId = TELEGRAM_CHANNEL_ID, opts = {}) {
       return result;
     }
 
-    console.log(`[telegram] sendMessage → chat=${chatId} (${message.length} chars)`);
+    const replyInfo = body.reply_parameters ? ` reply_to=${body.reply_parameters.message_id} in chat=${body.reply_parameters.chat_id || 'same'}` : '';
+    console.log(`[telegram] sendMessage → chat=${chatId} (${message.length} chars)${replyInfo}`);
     const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
     const result = await res.json();
-    if (result.ok) console.log(`[telegram] sendMessage OK → msg_id=${result.result.message_id}`);
+    if (result.ok) {
+      console.log(`[telegram] sendMessage OK → msg_id=${result.result.message_id}`);
+      if (body.reply_parameters) {
+        const r = result.result;
+        console.log(`[telegram] reply result: msg_id=${r.message_id}, thread=${r.message_thread_id}, reply_to=${r.reply_to_message?.message_id}, is_topic=${r.is_topic_message}`);
+      }
+    }
     else console.error(`[telegram] sendMessage FAILED: ${JSON.stringify(result)}`);
     return result;
   } catch (err) {
