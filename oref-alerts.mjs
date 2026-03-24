@@ -861,6 +861,7 @@ async function sendTelegram(message, chatId = TELEGRAM_CHANNEL_ID, opts = {}) {
       parse_mode: "HTML",
     };
     if (opts.replyMarkup) body.reply_markup = opts.replyMarkup;
+    if (opts.threadId) body.message_thread_id = opts.threadId;
 
     // Edit existing message if messageId provided
     if (opts.editMessageId) {
@@ -1052,6 +1053,8 @@ function buildEventMessage() {
 }
 
 let boomButtonMessageId = null; // boom button message in discussion group
+let discussionThreadId = null; // message_thread_id for linking to channel post in discussion group
+let pendingDiscussionUpdates = []; // queued until thread is detected
 
 async function updateEventMessage() {
   const msg = buildEventMessage();
@@ -1060,13 +1063,17 @@ async function updateEventMessage() {
   } else {
     const result = await sendTelegram(msg, TELEGRAM_CHANNEL_ID);
     if (result?.ok) lastTextMessageId = result.result.message_id;
-
-    // Post boom button in discussion group (once per event, after first channel post)
-    if (TELEGRAM_DISCUSSION_ID && !boomButtonMessageId) {
-      const btnResult = await sendTelegram("💥 שמעתם בום? דווחו כאן:", TELEGRAM_DISCUSSION_ID, { replyMarkup: BOOM_BUTTONS });
-      if (btnResult?.ok) boomButtonMessageId = btnResult.result.message_id;
-    }
   }
+}
+
+// Send boom button in discussion thread (called after thread is detected)
+async function sendBoomButtonToThread() {
+  if (!TELEGRAM_DISCUSSION_ID || !discussionThreadId || boomButtonMessageId) return;
+  const btnResult = await sendTelegram("💥 שמעתם בום? דווחו כאן:", TELEGRAM_DISCUSSION_ID, {
+    replyMarkup: BOOM_BUTTONS,
+    threadId: discussionThreadId,
+  });
+  if (btnResult?.ok) boomButtonMessageId = btnResult.result.message_id;
 }
 
 // Send update to the channel's discussion group (comment section)
@@ -1111,7 +1118,13 @@ async function sendDiscussionUpdate(updateType, details, alert = null) {
     msg += `\n📊 סיכום: ${eventSettlements.size} ישובים, ${eventWaves.length} גלים, ${min}:${String(sec).padStart(2, "0")} דקות`;
   }
 
-  await sendTelegram(msg, TELEGRAM_DISCUSSION_ID);
+  if (discussionThreadId) {
+    await sendTelegram(msg, TELEGRAM_DISCUSSION_ID, { threadId: discussionThreadId });
+  } else {
+    // Thread not yet detected — queue for when auto-forward arrives
+    pendingDiscussionUpdates.push(msg);
+    console.log(`[discussion] queued update (waiting for thread detection)`);
+  }
 }
 
 // Poll alerts with event lifecycle
@@ -1246,6 +1259,8 @@ async function fetchAlerts() {
         lastTextMessageId = null;
         lastMapMessageId = null;
         boomButtonMessageId = null;
+        discussionThreadId = null;
+        pendingDiscussionUpdates = [];
 
         await sendDiscussionUpdate("new", `התרעה מוקדמת באזורים: ${summarizeAreas(alert.data)}`, alert);
       } else {
@@ -1625,9 +1640,26 @@ async function pollTelegramCommands() {
         continue;
       }
 
-      const text = update.message?.text || update.message?.forward_text || "";
-      const fwdText = update.message?.forward_from_chat ? text : "";
-      const chatId = update.message?.chat?.id?.toString();
+      // Detect auto-forwarded channel post in discussion group → save thread ID
+      const umsg = update.message;
+      if (umsg?.is_automatic_forward && umsg?.chat?.id?.toString() === TELEGRAM_DISCUSSION_ID) {
+        discussionThreadId = umsg.message_thread_id || umsg.message_id;
+        console.log(`[discussion] thread detected: ${discussionThreadId} (from channel msg ${umsg.forward_from_message_id})`);
+
+        // Flush queued updates into the thread
+        for (const qMsg of pendingDiscussionUpdates) {
+          await sendTelegram(qMsg, TELEGRAM_DISCUSSION_ID, { threadId: discussionThreadId });
+        }
+        pendingDiscussionUpdates = [];
+
+        // Send boom button
+        await sendBoomButtonToThread();
+        continue;
+      }
+
+      const text = umsg?.text || umsg?.forward_text || "";
+      const fwdText = umsg?.forward_from_chat ? text : "";
+      const chatId = umsg?.chat?.id?.toString();
 
       // Handle /start boom from any user (URL deep link from channel button)
       if (text === "/start boom" || text === "/start boom ") {
