@@ -1,5 +1,5 @@
 import StaticMaps from "staticmaps";
-import { readFileSync, writeFileSync, appendFileSync } from "fs";
+import { readFileSync, writeFileSync, appendFileSync, existsSync } from "fs";
 
 const ALERT_URL = process.env.ALERT_URL || "https://www.oref.org.il/warningMessages/alert/alerts.json";
 const POLL_INTERVAL = 1000;
@@ -22,6 +22,15 @@ let feedbackLog = [];
 let simActive = false;
 let simResponse = "";
 let lastUpdateId = 0; // shared between pollTelegramCommands and resolveDiscussionThread
+
+// Persistent data directory — /data/ when Azure File Share is mounted, fallback to app dir
+const DATA_DIR = existsSync("/data") ? "/data" : new URL(".", import.meta.url).pathname;
+console.log(`Data directory: ${DATA_DIR}`);
+
+// All persistent file paths
+const ALERT_HISTORY_PATH = `${DATA_DIR}/alert-history.json`;
+const IMPACT_HISTORY_PATH = `${DATA_DIR}/impact-history.json`;
+const CORRELATION_PATH = `${DATA_DIR}/correlation-index.json`;
 
 // Multi-event support: each geographic region can have its own active event
 const activeEvents = new Map(); // regionKey → event object
@@ -106,7 +115,7 @@ function findNearestEvent(settlements) {
 }
 
 // Load feedback log
-const FEEDBACK_PATH = new URL("./feedback-log.json", import.meta.url);
+const FEEDBACK_PATH = `${DATA_DIR}/feedback-log.json`;
 try { feedbackLog = JSON.parse(readFileSync(FEEDBACK_PATH, "utf8")); } catch {}
 
 // [lng, lat] format (staticmaps convention)
@@ -384,7 +393,7 @@ const DEBRIS_REACH_KM = 20;
 // Load correlation index (rebuilt periodically)
 let correlationIndex = { regionCorrelation: {}, impactGivenAlert: { pImpact: 0.18 }, debrisGivenAlert: { pDebris: 0.30 } };
 try {
-  correlationIndex = JSON.parse(readFileSync(new URL("./correlation-index.json", import.meta.url), "utf8"));
+  correlationIndex = JSON.parse(readFileSync(CORRELATION_PATH, "utf8"));
 } catch {}
 
 function haversineKm(coord1, coord2) {
@@ -1307,7 +1316,7 @@ async function fetchAlerts() {
     // Save raw Oref data for debugging
     if (!simActive) {
       try {
-        appendFileSync("/tmp/oref-raw-alerts.jsonl", JSON.stringify({
+        appendFileSync(`${DATA_DIR}/oref-raw-alerts.jsonl`, JSON.stringify({
           timestamp: new Date().toISOString(), raw: parsed,
         }) + "\n");
       } catch {}
@@ -1452,7 +1461,7 @@ async function fetchAlerts() {
       }
 
       try {
-        appendFileSync("/tmp/alert-timestamps.jsonl", JSON.stringify({
+        appendFileSync(`${DATA_DIR}/alert-timestamps.jsonl`, JSON.stringify({
           time, timestamp: Date.now(), alertId: alert.id,
           phase: evt.phase, regionKey: evt.regionKey,
           settlementCount: evt.settlements.size,
@@ -1465,7 +1474,7 @@ async function fetchAlerts() {
 }
 
 // Test scenarios — persistent file stores the 10 biggest real events
-const TEST_SCENARIOS_PATH = new URL("./test-scenarios.json", import.meta.url);
+const TEST_SCENARIOS_PATH = `${DATA_DIR}/test-scenarios.json`;
 const MAX_SCENARIOS = 10;
 
 let TEST_SCENARIOS = [];
@@ -1844,7 +1853,7 @@ async function pollTelegramCommands() {
       // Save forwarded messages for analysis
       if (fwdText || (text && !text.startsWith("/"))) {
         try {
-          const logFile = "/tmp/oref-forwarded-msgs.jsonl";
+          const logFile = `${DATA_DIR}/oref-forwarded-msgs.jsonl`;
           const entry = JSON.stringify({
             date: update.message.date,
             forward_date: update.message.forward_date,
@@ -1891,17 +1900,13 @@ async function pollTelegramCommands() {
 
 // --- Historical Data: Backfill, Scraper, Correlation ---
 
-const ALERT_HISTORY_PATH = new URL("./alert-history.json", import.meta.url);
-const IMPACT_HISTORY_PATH = new URL("./impact-history.json", import.meta.url);
-const CORRELATION_PATH = new URL("./correlation-index.json", import.meta.url);
-
 // Backfill alert history from forwarded messages
 function backfillAlertHistory() {
   try { readFileSync(ALERT_HISTORY_PATH); return; } catch {} // already exists
 
   let lines;
   try {
-    lines = readFileSync("/tmp/oref-forwarded-msgs.jsonl", "utf8").trim().split("\n");
+    lines = readFileSync(`${DATA_DIR}/oref-forwarded-msgs.jsonl`, "utf8").trim().split("\n");
   } catch { console.log("אין הודעות מועברות לניתוח"); return; }
 
   const events = [];

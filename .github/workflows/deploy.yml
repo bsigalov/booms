@@ -17,5 +17,27 @@ jobs:
       - name: Build image in ACR
         run: az acr build --registry orefbotacr --image oref-bot:latest .
 
-      - name: Restart container
-        run: az container restart --resource-group oref-bot-rg --name oref-bot
+      - name: Deploy container with persistent storage
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
+        run: |
+          az container create \
+            --resource-group oref-bot-rg \
+            --name oref-bot \
+            --image orefbotacr.azurecr.io/oref-bot:latest \
+            --registry-login-server orefbotacr.azurecr.io \
+            --acr-identity \
+            --cpu 0.5 --memory 0.5 \
+            --os-type Linux \
+            --restart-policy Always \
+            --environment-variables \
+              TELEGRAM_BOT_TOKEN="$BOT_TOKEN" \
+              TELEGRAM_CHAT_ID="$CHAT_ID" \
+              TELEGRAM_CHANNEL_ID=@booms_on_the_way \
+              TZ=Asia/Jerusalem \
+            --azure-file-volume-account-name orefbotstorage \
+            --azure-file-volume-account-key "$STORAGE_KEY" \
+            --azure-file-volume-share-name oref-data \
+            --azure-file-volume-mount-path /data
