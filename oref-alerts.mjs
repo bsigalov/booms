@@ -828,13 +828,34 @@ async function generateAlertMap(areas, evt = null) {
   await ensureMarkers();
   if (areas.length === 0) return null;
 
+  // Calculate bounding box of alert settlements for explicit center + zoom
+  const areaCoords = areas.map(a => fuzzyMatch(a) || CITY_COORDS[a]).filter(Boolean);
+  if (areaCoords.length === 0) return null;
+
+  const lons = areaCoords.map(c => c[0]);
+  const lats = areaCoords.map(c => c[1]);
+  const center = [
+    (Math.min(...lons) + Math.max(...lons)) / 2,
+    (Math.min(...lats) + Math.max(...lats)) / 2,
+  ];
+  const spanLon = Math.max(...lons) - Math.min(...lons);
+  const spanLat = Math.max(...lats) - Math.min(...lats);
+  const span = Math.max(spanLon, spanLat);
+
+  // Choose zoom based on geographic span (degrees → zoom level)
+  let zoom;
+  if (span < 0.05) zoom = 13;       // ~5km — single settlement
+  else if (span < 0.15) zoom = 12;  // ~15km — small cluster
+  else if (span < 0.4) zoom = 11;   // ~40km — city region
+  else if (span < 0.8) zoom = 10;   // ~80km — district
+  else zoom = 9;                     // >80km — large area
+
   const map = new StaticMaps({
     width: 800,
     height: 600,
-    paddingX: 80,
-    paddingY: 80,
+    paddingX: 40,
+    paddingY: 40,
     tileUrl: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-    zoomRange: { min: 9, max: 14 },
   });
 
   const waves = evt ? evt.waves : [];
@@ -964,9 +985,10 @@ async function generateAlertMap(areas, evt = null) {
   }
 
   try {
-    await map.render();
+    await map.render(center, zoom);
     const mapPath = "/tmp/oref-alert-map.png";
     await map.image.save(mapPath);
+    console.log(`[map] rendered: center=[${center[0].toFixed(3)},${center[1].toFixed(3)}] zoom=${zoom} span=${span.toFixed(3)}° (${areas.length} settlements)`);
     return mapPath;
   } catch (e) {
     console.error("[מפה] שגיאה ברנדור:", e.message);
