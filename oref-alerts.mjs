@@ -853,8 +853,8 @@ async function generateAlertMap(areas, evt = null) {
   else zoom = 8;                     // >100km — country scale
 
   const map = new StaticMaps({
-    width: 800,
-    height: 600,
+    width: 1280,
+    height: 1280,
     paddingX: 40,
     paddingY: 40,
     tileUrl: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
