@@ -910,7 +910,7 @@ async function generateAlertMap(areas, evt = null) {
   const renderSettlement = (area, colors) => {
     const bd = findBoundary(area);
 
-    if (bd?.boundary && bd.population >= 10000) {
+    if (bd?.boundary) {
       // Skip if this boundary was already rendered (e.g. Tel Aviv subdivisions)
       const boundaryKey = bd.name || area;
       if (renderedBoundaries.has(boundaryKey)) {
