@@ -1174,22 +1174,8 @@ async function updateEventMessage(evt) {
     const result = await sendTelegram(msg, TELEGRAM_CHANNEL_ID);
     if (result?.ok) {
       evt.lastTextMessageId = result.result.message_id;
-      if (!evt.isTest && TELEGRAM_DISCUSSION_ID) {
-        await sendBoomButtonToThread(evt);
-      }
     }
   }
-}
-
-// Send boom button as comment on channel post
-async function sendBoomButtonToThread(evt) {
-  if (!TELEGRAM_DISCUSSION_ID || !evt.lastTextMessageId || evt.boomButtonMessageId) return;
-  const btnResult = await sendTelegram("💥 שמעתם בום? דווחו כאן:", TELEGRAM_DISCUSSION_ID, {
-    replyMarkup: BOOM_BUTTONS,
-    replyToMsgId: evt.lastTextMessageId,
-    replyChatId: TELEGRAM_CHANNEL_ID,
-  });
-  if (btnResult?.ok) evt.boomButtonMessageId = btnResult.result.message_id;
 }
 
 // Send update to the channel's discussion group (comment section)
@@ -1239,6 +1225,15 @@ async function sendDiscussionUpdate(evt, updateType, details, alert = null) {
     opts.replyChatId = TELEGRAM_CHANNEL_ID;
   }
   await sendTelegram(msg, TELEGRAM_DISCUSSION_ID, opts);
+
+  // Post boom button after every comment
+  if (evt.lastTextMessageId && BOOM_BUTTONS) {
+    await sendTelegram("💥 שמעתם בום? דווחו כאן:", TELEGRAM_DISCUSSION_ID, {
+      replyMarkup: BOOM_BUTTONS,
+      replyToMsgId: evt.lastTextMessageId,
+      replyChatId: TELEGRAM_CHANNEL_ID,
+    });
+  }
 }
 
 // Poll alerts with multi-event lifecycle
