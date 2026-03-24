@@ -845,11 +845,11 @@ async function generateAlertMap(areas, evt = null) {
 
   // Choose zoom based on geographic span (degrees → zoom level)
   let zoom;
-  if (span < 0.05) zoom = 13;       // ~5km — single settlement
-  else if (span < 0.15) zoom = 12;  // ~15km — small cluster
-  else if (span < 0.4) zoom = 11;   // ~40km — city region
-  else if (span < 0.8) zoom = 10;   // ~80km — district
-  else zoom = 9;                     // >80km — large area
+  if (span < 0.02) zoom = 12;       // ~2km — single settlement
+  else if (span < 0.1) zoom = 11;   // ~10km — small cluster
+  else if (span < 0.3) zoom = 10;   // ~30km — city region
+  else if (span < 0.7) zoom = 9;    // ~70km — district
+  else zoom = 8;                     // >70km — large area
 
   const map = new StaticMaps({
     width: 800,
@@ -940,7 +940,7 @@ async function generateAlertMap(areas, evt = null) {
         console.log(`[map] "${area}" → CIRCLE at [${coord}] (${bd ? `pop=${bd.population}, no boundary` : "no boundary data"}, fill=${colors.fill})`);
         map.addCircle({
           coord,
-          radius: 1000, // 1km in meters
+          radius: 500, // 500m in meters
           color: colors.stroke,
           fill: colors.fill,
           width: 1,
@@ -1194,7 +1194,7 @@ function buildEventMessage(evt) {
 
   let msg = `${header}\n${timeLine}`;
 
-  if (evt.phase === "early_warning" || evt.phase === "alert") {
+  if (evt.riskMsg) {
     msg += evt.riskMsg;
   }
 
