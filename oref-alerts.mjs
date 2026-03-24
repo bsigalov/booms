@@ -1915,15 +1915,45 @@ async function pollTelegramCommands() {
         const h = Math.floor(uptime / 3600);
         const m = Math.floor((uptime % 3600) / 60);
         const s = uptime % 60;
-        await sendTelegram(
-          `✅ <b>הבוט פעיל</b>\n` +
-          `⏱ זמן ריצה: ${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}\n` +
-          `📡 סורק כל ${POLL_INTERVAL / 1000} שנייה\n` +
-          `🗺 ישובים במילון: ${Object.keys(CITY_COORDS).length}` +
-          (simActive ? `\n\n🧪 <b>סימולציה פעילה</b> (/stop לביטול)` : "") +
-          (activeEvents.size > 0 ? `\n📍 אירועים פעילים: ${[...activeEvents.values()].map(e => `${e.regionKey} [${e.phase}] (${e.settlements.size})`).join(", ")}` : ""),
-          TELEGRAM_CHAT_ID
-        );
+        const mem = process.memoryUsage();
+        const memMB = (mem.rss / 1024 / 1024).toFixed(1);
+        const boundaryCount = Object.keys(SETTLEMENT_BOUNDARIES).length;
+        const scenarioCount = TEST_SCENARIOS.length;
+
+        let statusMsg = `✅ <b>הבוט פעיל</b>\n\n`;
+        statusMsg += `<b>מערכת:</b>\n`;
+        statusMsg += `⏱ זמן ריצה: ${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}\n`;
+        statusMsg += `💾 זיכרון: ${memMB} MB\n`;
+        statusMsg += `📂 אחסון: ${DATA_DIR}\n\n`;
+
+        statusMsg += `<b>נתונים:</b>\n`;
+        statusMsg += `🗺 ישובים: ${Object.keys(CITY_COORDS).length} קואורדינטות\n`;
+        statusMsg += `📐 גבולות: ${boundaryCount} פוליגונים\n`;
+        statusMsg += `🗂 אזורים: ${Object.keys(REGION_MAP).length} ישובים ב-${new Set(Object.values(REGION_MAP)).size} אזורים\n`;
+        statusMsg += `🧪 תסריטים: ${scenarioCount} שמורים\n\n`;
+
+        statusMsg += `<b>ערוץ:</b>\n`;
+        statusMsg += `📡 סורק כל ${POLL_INTERVAL / 1000} שנייה\n`;
+        statusMsg += `💬 קבוצת דיון: ${TELEGRAM_DISCUSSION_ID || "לא מוגדר"}\n`;
+        statusMsg += `🏠 בית: ${HOME_NAME} [${HOME_COORD}]\n`;
+
+        if (simActive) {
+          statusMsg += `\n🧪 <b>סימולציה פעילה</b> (/stop לביטול)`;
+        }
+
+        if (activeEvents.size > 0) {
+          statusMsg += `\n\n<b>אירועים פעילים (${activeEvents.size}):</b>\n`;
+          for (const [key, e] of activeEvents) {
+            const dur = Math.round((Date.now() - e.startTime) / 60000);
+            statusMsg += `📍 ${e.regionKey}\n`;
+            statusMsg += `   מצב: ${e.phase} | ${e.settlements.size} ישובים | ${e.waves.length} גלים | ${dur} דק'\n`;
+            if (e.discussionThreadId) statusMsg += `   💬 thread: ${e.discussionThreadId}\n`;
+          }
+        } else {
+          statusMsg += `\n📍 אין אירועים פעילים`;
+        }
+
+        await sendTelegram(statusMsg, TELEGRAM_CHAT_ID);
       } else if (text === "/help") {
         await sendTelegram(
           `📋 <b>פקודות זמינות:</b>\n\n` +
