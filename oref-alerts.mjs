@@ -69,7 +69,7 @@ function createEvent(regionKey, title, cat, settlements, time, protectionMin, al
 }
 
 // Find which active event a set of settlements belongs to (by geographic proximity)
-const EVENT_MERGE_DISTANCE_KM = 100;
+const EVENT_MERGE_DISTANCE_KM = 50;
 
 function findNearestEvent(settlements) {
   if (activeEvents.size === 0) return null;
