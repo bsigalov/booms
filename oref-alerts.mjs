@@ -1135,15 +1135,16 @@ function buildEventMessage(evt) {
 }
 
 async function updateEventMessage(evt) {
-  const msg = buildEventMessage(evt);
+  let msg = buildEventMessage(evt);
+  if (simActive) msg = `🧪 <b>[טסט]</b>\n${msg}`;
   if (evt.lastTextMessageId) {
     await sendTelegram(msg, TELEGRAM_CHANNEL_ID, { editMessageId: evt.lastTextMessageId });
   } else {
     const result = await sendTelegram(msg, TELEGRAM_CHANNEL_ID);
     if (result?.ok) {
       evt.lastTextMessageId = result.result.message_id;
-      // Look up the discussion thread for this channel post
-      if (TELEGRAM_DISCUSSION_ID && !evt.discussionThreadId) {
+      // Look up the discussion thread for this channel post (real alerts only)
+      if (!simActive && TELEGRAM_DISCUSSION_ID && !evt.discussionThreadId) {
         await resolveDiscussionThread(evt);
       }
     }
@@ -1220,7 +1221,7 @@ async function sendBoomButtonToThread(evt) {
 
 // Send update to the channel's discussion group (comment section)
 async function sendDiscussionUpdate(evt, updateType, details, alert = null) {
-  if (!TELEGRAM_DISCUSSION_ID) return;
+  if (!TELEGRAM_DISCUSSION_ID || simActive) return; // skip discussion updates for tests
   const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
 
   let emoji, label;
@@ -1349,7 +1350,8 @@ async function fetchAlerts() {
       console.log(`[alert][${mode}] NEW id=${alert.id} cat="${alert.cat}" title="${alert.title}" settlements=${settlements.length}: ${settlements.join(", ")}`);
 
       // Find or create the right event for these settlements
-      const nearest = findNearestEvent(settlements);
+      // Simulations always create fresh events (never merge with real)
+      const nearest = simActive ? null : findNearestEvent(settlements);
       let evt;
 
       if (nearest) {
