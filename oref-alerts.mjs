@@ -7,6 +7,7 @@ const POLL_INTERVAL = 1000;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const TELEGRAM_CHANNEL_ID = process.env.TELEGRAM_CHANNEL_ID || "@booms_on_the_way";
+let TELEGRAM_DISCUSSION_ID = process.env.TELEGRAM_DISCUSSION_ID || ""; // linked discussion group (auto-detected if not set)
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
   console.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID env vars");
@@ -266,24 +267,36 @@ function fuzzyMatch(place) {
 async function geocode(place) {
   const key = place.trim();
   const fuzzy = fuzzyMatch(key);
-  if (fuzzy) return fuzzy;
-  if (geoCache.has(key)) return geoCache.get(key);
+  if (fuzzy) {
+    console.log(`[geocode] "${key}" → fuzzy match [${fuzzy}]`);
+    return fuzzy;
+  }
+  if (geoCache.has(key)) {
+    console.log(`[geocode] "${key}" → cache hit [${geoCache.get(key)}]`);
+    return geoCache.get(key);
+  }
 
   try {
     const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(key + ", ישראל")}&format=json&limit=1`;
+    console.log(`[geocode] "${key}" → Nominatim lookup...`);
     const res = await fetch(url, {
       headers: { "User-Agent": "OrefAlertBot/1.0" },
     });
     const contentType = res.headers.get("content-type") || "";
-    if (!contentType.includes("json")) return null;
+    if (!contentType.includes("json")) {
+      console.warn(`[geocode] "${key}" → Nominatim returned non-JSON: ${contentType}`);
+      return null;
+    }
     const data = await res.json();
     if (data.length > 0) {
       const coords = [parseFloat(data[0].lon), parseFloat(data[0].lat)];
       geoCache.set(key, coords);
+      console.log(`[geocode] "${key}" → Nominatim result [${coords}] (${data[0].display_name})`);
       return coords;
     }
+    console.warn(`[geocode] "${key}" → Nominatim: no results`);
   } catch (e) {
-    console.error(`[גיאוקוד] ${e.message}`);
+    console.error(`[geocode] "${key}" → error: ${e.message}`);
   }
   return null;
 }
@@ -651,9 +664,7 @@ async function resolveCoords(areas) {
     if (coord) coords.push(coord);
     else missed.push(area);
   }
-  if (missed.length > 0) {
-    console.error(`[גיאוקוד] חסרים ${missed.length}/${areas.length}: ${missed.slice(0, 10).join(", ")}`);
-  }
+  console.log(`[resolveCoords] ${coords.length}/${areas.length} resolved${missed.length > 0 ? `, MISSING: ${missed.join(", ")}` : ""}`);
   return coords;
 }
 
@@ -769,7 +780,10 @@ async function generateAlertMap(areas) {
     if (bd?.boundary && bd.population >= 10000) {
       // Skip if this boundary was already rendered (e.g. Tel Aviv subdivisions)
       const boundaryKey = bd.name || area;
-      if (renderedBoundaries.has(boundaryKey)) return;
+      if (renderedBoundaries.has(boundaryKey)) {
+        console.log(`[map] "${area}" → skip (already rendered as "${boundaryKey}")`);
+        return;
+      }
       renderedBoundaries.add(boundaryKey);
 
       // Render as filled polygon
@@ -777,6 +791,7 @@ async function generateAlertMap(areas) {
       const rings = geojson.type === "MultiPolygon"
         ? geojson.coordinates.flat()
         : geojson.coordinates;
+      console.log(`[map] "${area}" → POLYGON "${boundaryKey}" (pop=${bd.population}, ${rings.length} rings, fill=${colors.fill})`);
       for (const ring of rings) {
         map.addPolygon({
           coords: ring, // [lng, lat] pairs — matches staticmaps convention
@@ -789,6 +804,7 @@ async function generateAlertMap(areas) {
       // Render as circle area for settlements <10K (3km radius — visible at any zoom)
       const coord = fuzzyMatch(area) || CITY_COORDS[area];
       if (coord) {
+        console.log(`[map] "${area}" → CIRCLE at [${coord}] (${bd ? `pop=${bd.population}, no boundary` : "no boundary data"}, fill=${colors.fill})`);
         map.addCircle({
           coord,
           radius: 3000, // 3km in meters
@@ -796,6 +812,8 @@ async function generateAlertMap(areas) {
           fill: colors.fill,
           width: 1,
         });
+      } else {
+        console.warn(`[map] "${area}" → SKIPPED (no coords found)`);
       }
     }
   };
@@ -847,22 +865,29 @@ async function sendTelegram(message, chatId = TELEGRAM_CHANNEL_ID, opts = {}) {
     // Edit existing message if messageId provided
     if (opts.editMessageId) {
       body.message_id = opts.editMessageId;
+      console.log(`[telegram] editMessageText → chat=${chatId} msg=${opts.editMessageId}`);
       const res = await fetch(`${TELEGRAM_API}/editMessageText`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      return await res.json();
+      const result = await res.json();
+      if (!result.ok) console.error(`[telegram] editMessageText FAILED: ${JSON.stringify(result)}`);
+      return result;
     }
 
+    console.log(`[telegram] sendMessage → chat=${chatId} (${message.length} chars)`);
     const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    return await res.json();
+    const result = await res.json();
+    if (result.ok) console.log(`[telegram] sendMessage OK → msg_id=${result.result.message_id}`);
+    else console.error(`[telegram] sendMessage FAILED: ${JSON.stringify(result)}`);
+    return result;
   } catch (err) {
-    console.error(`[טלגרם שגיאה] ${err.message}`);
+    console.error(`[telegram] sendMessage error: ${err.message}`);
   }
 }
 
@@ -885,6 +910,7 @@ async function sendTelegramPhoto(filePath, caption, chatId = TELEGRAM_CHANNEL_ID
 
     // Try to edit existing map message
     if (lastMapMessageId && chatId === TELEGRAM_CHANNEL_ID) {
+      console.log(`[telegram] editMessageMedia → chat=${chatId} msg=${lastMapMessageId}`);
       const form = new FormData();
       form.append("chat_id", chatId);
       form.append("message_id", lastMapMessageId);
@@ -893,13 +919,17 @@ async function sendTelegramPhoto(filePath, caption, chatId = TELEGRAM_CHANNEL_ID
 
       const res = await fetch(`${TELEGRAM_API}/editMessageMedia`, { method: "POST", body: form });
       const result = await res.json();
-      if (result.ok) return result;
+      if (result.ok) {
+        console.log(`[telegram] editMessageMedia OK`);
+        return result;
+      }
       // Edit failed — log but do NOT fall through to new message (prevents duplicates)
-      console.error(`[טלגרם עריכה] editMessageMedia failed: ${JSON.stringify(result)}`);
+      console.error(`[telegram] editMessageMedia FAILED: ${JSON.stringify(result)}`);
       return null;
     }
 
     // Send new photo (only when no existing message to edit)
+    console.log(`[telegram] sendPhoto → chat=${chatId} caption="${caption}"`);
     const form = new FormData();
     form.append("chat_id", chatId);
     form.append("photo", blob, "map.png");
@@ -908,12 +938,17 @@ async function sendTelegramPhoto(filePath, caption, chatId = TELEGRAM_CHANNEL_ID
 
     const res = await fetch(`${TELEGRAM_API}/sendPhoto`, { method: "POST", body: form });
     const result = await res.json();
-    if (result.ok && chatId === TELEGRAM_CHANNEL_ID) {
-      lastMapMessageId = result.result.message_id;
+    if (result.ok) {
+      console.log(`[telegram] sendPhoto OK → msg_id=${result.result.message_id}`);
+      if (chatId === TELEGRAM_CHANNEL_ID) {
+        lastMapMessageId = result.result.message_id;
+      }
+    } else {
+      console.error(`[telegram] sendPhoto FAILED: ${JSON.stringify(result)}`);
     }
     return result;
   } catch (err) {
-    console.error(`[טלגרם תמונה] ${err.message}`);
+    console.error(`[telegram] sendPhoto error: ${err.message}`);
   }
 }
 
@@ -924,7 +959,7 @@ let BOOM_BUTTONS = { inline_keyboard: [[
   { text: "💥 שמעתי בום!", callback_data: "fb_boom_start" },
 ]] };
 
-// Auto-detect bot username at startup → upgrade to URL button (opens bot chat directly)
+// Auto-detect bot username + discussion group at startup
 (async () => {
   try {
     const res = await fetch(`${TELEGRAM_API}/getMe`);
@@ -936,6 +971,20 @@ let BOOM_BUTTONS = { inline_keyboard: [[
       console.log(`Bot username: @${data.result.username}`);
     }
   } catch {}
+
+  // Auto-detect linked discussion group from channel
+  if (!TELEGRAM_DISCUSSION_ID) {
+    try {
+      const res = await fetch(`${TELEGRAM_API}/getChat?chat_id=${encodeURIComponent(TELEGRAM_CHANNEL_ID)}`);
+      const data = await res.json();
+      if (data.ok && data.result.linked_chat_id) {
+        TELEGRAM_DISCUSSION_ID = data.result.linked_chat_id.toString();
+        console.log(`Discussion group auto-detected: ${TELEGRAM_DISCUSSION_ID} ("${data.result.title}" → linked chat)`);
+      }
+    } catch (e) {
+      console.warn(`[discussion] auto-detect failed: ${e.message}`);
+    }
+  }
 })();
 
 function parseProtectionMinutes(desc) {
@@ -1012,6 +1061,51 @@ async function updateEventMessage() {
   }
 }
 
+// Send update to the channel's discussion group (comment section)
+async function sendDiscussionUpdate(updateType, details, alert = null) {
+  if (!TELEGRAM_DISCUSSION_ID) return;
+  const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
+
+  let emoji, label;
+  switch (updateType) {
+    case "new":          emoji = "🚨"; label = "התרעה חדשה"; break;
+    case "escalate":     emoji = "🔴"; label = "אזעקה — גל ראשון"; break;
+    case "expand":       emoji = "📢"; label = "האזעקה מתרחבת"; break;
+    case "wave":         emoji = "🔁"; label = "גל נוסף"; break;
+    case "resume":       emoji = "🚨"; label = "אזעקות חודשו"; break;
+    case "waiting":      emoji = "🟡"; label = "המתנה — שהו במרחב מוגן"; break;
+    case "ended":        emoji = "✅"; label = "האירוע הסתיים"; break;
+    default:             emoji = "ℹ️"; label = "עדכון"; break;
+  }
+
+  let msg = `${emoji} <b>עדכון ${time} — ${label}</b>\n`;
+  msg += `─────────────────────\n`;
+
+  if (details) {
+    msg += `${details}\n`;
+  }
+
+  // Add raw Oref data for alert-related updates
+  if (alert?.data && alert.data.length > 0) {
+    msg += `\n<blockquote>`;
+    msg += `📋 <b>${alert.title}</b>\n`;
+    msg += `${alert.desc}\n\n`;
+    msg += `<b>ישובים (${alert.data.length}):</b>\n`;
+    msg += alert.data.join(", ");
+    msg += `</blockquote>`;
+  }
+
+  // Add event summary for non-alert updates
+  if (!alert && eventSettlements.size > 0) {
+    const duration = Math.round((Date.now() - eventStartTime) / 1000);
+    const min = Math.floor(duration / 60);
+    const sec = duration % 60;
+    msg += `\n📊 סיכום: ${eventSettlements.size} ישובים, ${eventWaves.length} גלים, ${min}:${String(sec).padStart(2, "0")} דקות`;
+  }
+
+  await sendTelegram(msg, TELEGRAM_DISCUSSION_ID);
+}
+
 // Poll alerts with event lifecycle
 let emptyCount = 0;
 
@@ -1038,10 +1132,12 @@ async function fetchAlerts() {
       // early_warning/alert → waiting
       if ((eventPhase === "early_warning" || eventPhase === "alert") && emptyCount >= emptyThreshold) {
         const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
+        console.log(`[lifecycle] ${eventPhase} → waiting (empty ${emptyCount}/${emptyThreshold}), settlements=${eventSettlements.size}`);
         eventPhase = "waiting";
         currentWaveSettlements = new Set(); // clear wave for next map
         eventHistory.push({ time, text: "🟡 ממתינים במרחב מוגן" });
         await updateEventMessage();
+        await sendDiscussionUpdate("waiting", `אין אזעקות נוספות כרגע.\nיש להישאר במרחב מוגן ${eventProtectionMin} דקות מרגע האזעקה האחרונה.`);
         return; // Don't check ended in same cycle — let protection time count from NOW
       }
 
@@ -1051,9 +1147,11 @@ async function fetchAlerts() {
         const waitingSince = Date.now() - emptyCount * POLL_INTERVAL; // approximate when waiting started
         if (emptyCount * POLL_INTERVAL > (protMin + 2) * 60000) { // protMin + 2min buffer since last alert
           const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
+          console.log(`[lifecycle] waiting → ended (protection=${protMin}min, elapsed=${Math.round(emptyCount * POLL_INTERVAL / 60000)}min)`);
           eventPhase = "ended";
           eventHistory.push({ time, text: "✅ האירוע הסתיים" });
           await updateEventMessage();
+          await sendDiscussionUpdate("ended", `ניתן לצאת מהמרחב המוגן.\nסה"כ ${eventSettlements.size} ישובים, ${eventWaves.length} גלים.`);
         }
       }
       return;
@@ -1062,6 +1160,8 @@ async function fetchAlerts() {
     emptyCount = 0;
     const parsed = JSON.parse(text);
     const alerts = Array.isArray(parsed) ? parsed : [parsed];
+    const mode = simActive ? "TEST" : "REAL";
+    console.log(`[alert][${mode}] received ${alerts.length} alert(s), phase=${eventPhase || "none"}`);
 
     // Purge expired seen IDs
     const now = Date.now();
@@ -1070,136 +1170,170 @@ async function fetchAlerts() {
     }
 
     for (const alert of alerts) {
-      if (!seenAlertIds.has(alert.id)) {
-        seenAlertIds.set(alert.id, now);
-        lastAlertId = alert.id;
-        const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
+      if (seenAlertIds.has(alert.id)) {
+        continue; // already processed
+      }
+      seenAlertIds.set(alert.id, now);
+      lastAlertId = alert.id;
+      const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
 
-        // Merge window: scale with event size (5 min base, up to 15 min for massive attacks)
-        const mergeWindowMs = Math.min(15, 5 + Math.floor(eventSettlements.size / 50)) * 60000;
-        const withinMergeWindow = lastWaveTime && (Date.now() - lastWaveTime < mergeWindowMs);
+      console.log(`[alert][${mode}] NEW id=${alert.id} cat="${alert.cat}" title="${alert.title}" settlements=${alert.data?.length}: ${(alert.data || []).join(", ")}`);
 
-        // Different event type while active — only end if outside merge window
-        if (eventPhase && eventPhase !== "ended" && eventType && alert.cat !== eventType) {
-          if (!withinMergeWindow) {
-            eventHistory.push({ time, text: "✅ האירוע הסתיים" });
-            eventPhase = "ended";
-            await updateEventMessage();
-            eventPhase = null;
-            lastTextMessageId = null;
-            lastMapMessageId = null;
-          } else {
-            eventType = alert.cat;
-            if (alert.title !== eventTitle) eventTitle = alert.title;
-          }
-        }
+      // Merge window: scale with event size (5 min base, up to 15 min for massive attacks)
+      const mergeWindowMs = Math.min(15, 5 + Math.floor(eventSettlements.size / 50)) * 60000;
+      const withinMergeWindow = lastWaveTime && (Date.now() - lastWaveTime < mergeWindowMs);
+      if (lastWaveTime) {
+        const sinceLast = Math.round((Date.now() - lastWaveTime) / 1000);
+        console.log(`[alert] mergeWindow=${Math.round(mergeWindowMs/60000)}min, sinceLastWave=${sinceLast}s, within=${withinMergeWindow}`);
+      }
 
-        // Reopen recently-ended event instead of creating new one
-        if (eventPhase === "ended" && withinMergeWindow) {
-          eventPhase = "alert";
-          eventHistory.push({ time, text: "🚨 אזעקות חודשו" });
-        }
-
-        // Stale ended event — clean up so a fresh event starts
-        if (eventPhase === "ended") {
+      // Different event type while active — only end if outside merge window
+      if (eventPhase && eventPhase !== "ended" && eventType && alert.cat !== eventType) {
+        if (!withinMergeWindow) {
+          console.log(`[lifecycle] type changed "${eventType}" → "${alert.cat}" outside merge window → ending event`);
+          eventHistory.push({ time, text: "✅ האירוע הסתיים" });
+          eventPhase = "ended";
+          await updateEventMessage();
           eventPhase = null;
           lastTextMessageId = null;
           lastMapMessageId = null;
-        }
-
-        const isNew = eventPhase === null;
-
-        if (isNew) {
-          // New event — early warning
-          eventPhase = "early_warning";
-          eventStartTime = Date.now();
-          eventStartTimeStr = time;
-          eventTitle = alert.title;
+        } else {
+          console.log(`[lifecycle] type changed "${eventType}" → "${alert.cat}" within merge window → merging`);
           eventType = alert.cat;
-          eventProtectionMin = parseProtectionMinutes(alert.desc);
-          eventSettlements = new Set(alert.data);
-          currentWaveSettlements = new Set(alert.data);
-          eventWaves = [];
-          eventHistory = [{ time, text: `⚠️ התרעה מוקדמת: ${summarizeAreas(alert.data)} (${alert.data.length})` }];
-          lastWaveTime = Date.now();
-          lastTextMessageId = null;
-          lastMapMessageId = null;
-        } else {
-          // Continuing event — escalate to alert and track waves
-          const wasEarlyWarning = eventPhase === "early_warning";
-          if (wasEarlyWarning) eventPhase = "alert";
-          if (eventPhase === "waiting") {
-            eventPhase = "alert";
-            eventHistory.push({ time, text: "🚨 אזעקות חודשו" });
-          }
-
-          // Create a new wave for this alert batch
-          const waveSettlements = new Set(alert.data);
-          eventWaves.push({ settlements: waveSettlements, time });
-
-          const newSettlements = alert.data.filter(s => !eventSettlements.has(s));
-          for (const s of alert.data) {
-            eventSettlements.add(s);
-            currentWaveSettlements.add(s);
-          }
-          lastWaveTime = Date.now();
-
-          const newProt = parseProtectionMinutes(alert.desc);
-          if (newProt > eventProtectionMin) eventProtectionMin = newProt;
-
-          if (newSettlements.length > 0) {
-            const list = newSettlements.slice(0, 5).join(", ");
-            const more = newSettlements.length > 5 ? ` ועוד ${newSettlements.length - 5}` : "";
-            eventHistory.push({ time, text: `🚨 התרחבות: ${list}${more} (${eventSettlements.size} סה"כ)` });
-          } else {
-            eventHistory.push({ time, text: `🚨 אזעקה: ${summarizeAreas(alert.data)}` });
-          }
+          if (alert.title !== eventTitle) eventTitle = alert.title;
         }
-
-        // Compute & cache risk (uses cumulative settlements for full picture)
-        const allAreas = [...eventSettlements];
-        const alertCoords = await resolveCoords(allAreas);
-        const alertRegions = new Set();
-        for (const area of allAreas) {
-          if (REGION_MAP[area]) alertRegions.add(REGION_MAP[area]);
-          for (const [key, region] of Object.entries(REGION_MAP)) {
-            if (area.includes(key)) { alertRegions.add(region); break; }
-          }
-        }
-        eventRiskMsg = formatRiskMessage(alertCoords, alertRegions, allAreas);
-
-        console.log(`\n[${time}] ${alert.title} [${eventPhase}] ${eventSettlements.size} ישובים, ${eventWaves.length} גלים`);
-
-        await updateEventMessage();
-
-        // Map shows current active wave (accumulated since last "waiting" reset)
-        const mapAreas = [...currentWaveSettlements];
-        const clusters = clusterSettlements(mapAreas);
-        if (clusters.length >= 2) {
-          console.log(`[מפה] ${clusters.length} אשכולות גיאוגרפיים: ${clusters.map(c => c.length).join(", ")} ישובים`);
-          for (let ci = 0; ci < clusters.length; ci++) {
-            const clusterAreas = clusters[ci];
-            const clusterRegions = summarizeAreas(clusterAreas);
-            const mapPath = await generateAlertMap(clusterAreas);
-            if (mapPath) {
-              await sendTelegramPhoto(mapPath, `📍 ${clusterRegions} - ${time} (${clusterAreas.length} ישובים)`);
-            }
-          }
-        } else {
-          const mapPath = await generateAlertMap(mapAreas);
-          if (mapPath) {
-            await sendTelegramPhoto(mapPath, `📍 מפת התרעות - ${time} (${mapAreas.length} ישובים)`);
-          }
-        }
-
-        try {
-          appendFileSync("/tmp/alert-timestamps.jsonl", JSON.stringify({
-            time, timestamp: Date.now(), alertId: alert.id,
-            phase: eventPhase, regions: [...alertRegions],
-            settlementCount: eventSettlements.size,
-          }) + "\n");
-        } catch {}
       }
+
+      // Reopen recently-ended event instead of creating new one
+      if (eventPhase === "ended" && withinMergeWindow) {
+        console.log(`[lifecycle] ended → alert (reopened within merge window)`);
+        eventPhase = "alert";
+        eventHistory.push({ time, text: "🚨 אזעקות חודשו" });
+      }
+
+      // Stale ended event — clean up so a fresh event starts
+      if (eventPhase === "ended") {
+        console.log(`[lifecycle] ended → null (stale, starting fresh)`);
+        eventPhase = null;
+        lastTextMessageId = null;
+        lastMapMessageId = null;
+      }
+
+      const isNew = eventPhase === null;
+
+      if (isNew) {
+        // New event — early warning
+        console.log(`[lifecycle] null → early_warning (NEW EVENT: "${alert.title}", ${alert.data?.length} settlements)`);
+        eventPhase = "early_warning";
+        eventStartTime = Date.now();
+        eventStartTimeStr = time;
+        eventTitle = alert.title;
+        eventType = alert.cat;
+        eventProtectionMin = parseProtectionMinutes(alert.desc);
+        eventSettlements = new Set(alert.data);
+        currentWaveSettlements = new Set(alert.data);
+        eventWaves = [];
+        eventHistory = [{ time, text: `⚠️ התרעה מוקדמת: ${summarizeAreas(alert.data)} (${alert.data.length})` }];
+        lastWaveTime = Date.now();
+        lastTextMessageId = null;
+        lastMapMessageId = null;
+
+        await sendDiscussionUpdate("new", `התרעה מוקדמת באזורים: ${summarizeAreas(alert.data)}`, alert);
+      } else {
+        // Continuing event — escalate to alert and track waves
+        const wasEarlyWarning = eventPhase === "early_warning";
+        let resumedFromWaiting = false;
+        if (wasEarlyWarning) {
+          console.log(`[lifecycle] early_warning → alert (wave 1)`);
+          eventPhase = "alert";
+        }
+        if (eventPhase === "waiting") {
+          console.log(`[lifecycle] waiting → alert (resumed)`);
+          eventPhase = "alert";
+          resumedFromWaiting = true;
+          eventHistory.push({ time, text: "🚨 אזעקות חודשו" });
+        }
+
+        // Create a new wave for this alert batch
+        const waveSettlements = new Set(alert.data);
+        eventWaves.push({ settlements: waveSettlements, time });
+
+        const newSettlements = alert.data.filter(s => !eventSettlements.has(s));
+        for (const s of alert.data) {
+          eventSettlements.add(s);
+          currentWaveSettlements.add(s);
+        }
+        lastWaveTime = Date.now();
+
+        const newProt = parseProtectionMinutes(alert.desc);
+        if (newProt > eventProtectionMin) eventProtectionMin = newProt;
+
+        console.log(`[lifecycle] wave ${eventWaves.length}: +${newSettlements.length} new settlements (${eventSettlements.size} total, ${currentWaveSettlements.size} in current wave)`);
+
+        if (newSettlements.length > 0) {
+          const list = newSettlements.slice(0, 5).join(", ");
+          const more = newSettlements.length > 5 ? ` ועוד ${newSettlements.length - 5}` : "";
+          eventHistory.push({ time, text: `🚨 התרחבות: ${list}${more} (${eventSettlements.size} סה"כ)` });
+        } else {
+          eventHistory.push({ time, text: `🚨 אזעקה: ${summarizeAreas(alert.data)}` });
+        }
+
+        // Discussion group update
+        if (resumedFromWaiting) {
+          await sendDiscussionUpdate("resume", `אזעקות חודשו באזורים: ${summarizeAreas(alert.data)}`, alert);
+        } else if (wasEarlyWarning) {
+          await sendDiscussionUpdate("escalate", `אזעקה! גל ראשון ב: ${summarizeAreas(alert.data)} (${eventSettlements.size} ישובים)`, alert);
+        } else if (newSettlements.length > 0) {
+          await sendDiscussionUpdate("expand", `+${newSettlements.length} ישובים חדשים: ${newSettlements.join(", ")} (${eventSettlements.size} סה"כ)`, alert);
+        } else {
+          await sendDiscussionUpdate("wave", `גל ${eventWaves.length} — ${summarizeAreas(alert.data)}`, alert);
+        }
+      }
+
+      // Compute & cache risk (uses cumulative settlements for full picture)
+      const allAreas = [...eventSettlements];
+      const alertCoords = await resolveCoords(allAreas);
+      const alertRegions = new Set();
+      for (const area of allAreas) {
+        if (REGION_MAP[area]) alertRegions.add(REGION_MAP[area]);
+        for (const [key, region] of Object.entries(REGION_MAP)) {
+          if (area.includes(key)) { alertRegions.add(region); break; }
+        }
+      }
+      eventRiskMsg = formatRiskMessage(alertCoords, alertRegions, allAreas);
+
+      console.log(`\n[${time}][${mode}] ${alert.title} [${eventPhase}] ${eventSettlements.size} settlements, ${eventWaves.length} waves, regions=[${[...alertRegions].join(", ")}]`);
+
+      await updateEventMessage();
+
+      // Map shows current active wave (accumulated since last "waiting" reset)
+      const mapAreas = [...currentWaveSettlements];
+      console.log(`[map] rendering ${mapAreas.length} settlements: ${mapAreas.join(", ")}`);
+      const clusters = clusterSettlements(mapAreas);
+      if (clusters.length >= 2) {
+        console.log(`[map] ${clusters.length} geographic clusters: ${clusters.map(c => c.length).join(", ")} settlements`);
+        for (let ci = 0; ci < clusters.length; ci++) {
+          const clusterAreas = clusters[ci];
+          const clusterRegions = summarizeAreas(clusterAreas);
+          const mapPath = await generateAlertMap(clusterAreas);
+          if (mapPath) {
+            await sendTelegramPhoto(mapPath, `📍 ${clusterRegions} - ${time} (${clusterAreas.length} ישובים)`);
+          }
+        }
+      } else {
+        const mapPath = await generateAlertMap(mapAreas);
+        if (mapPath) {
+          await sendTelegramPhoto(mapPath, `📍 מפת התרעות - ${time} (${mapAreas.length} ישובים)`);
+        }
+      }
+
+      try {
+        appendFileSync("/tmp/alert-timestamps.jsonl", JSON.stringify({
+          time, timestamp: Date.now(), alertId: alert.id,
+          phase: eventPhase, regions: [...alertRegions],
+          settlementCount: eventSettlements.size,
+        }) + "\n");
+      } catch {}
     }
   } catch (err) {
     console.error(`[שגיאה] ${err.message}`);
@@ -1754,6 +1888,7 @@ await fetch(`${TELEGRAM_API}/setMyCommands`, {
 console.log("מאזין להתרעות פיקוד העורף... (Ctrl+C לעצירה)");
 console.log(`תדירות: כל ${POLL_INTERVAL / 1000} שנייה`);
 console.log("התראות טלגרם: פעיל (טקסט + מפה)");
+console.log(`קבוצת דיון: ${TELEGRAM_DISCUSSION_ID || "לא מוגדר"}`);
 console.log("פקודת בדיקה: /test\n");
 
 setInterval(fetchAlerts, POLL_INTERVAL);
