@@ -22,6 +22,7 @@ const SEEN_ID_TTL_MS = 300_000; // 5 min TTL
 let feedbackLog = [];
 let simActive = false;
 let lastUpdateId = 0; // shared between pollTelegramCommands and resolveDiscussionThread
+const pendingThreadDetection = new Map(); // channelMsgId → evt, for discussion thread detection
 
 // Persistent data directory — /data/ when Azure File Share is mounted, fallback to app dir
 const DATA_DIR = existsSync("/data") ? "/data" : new URL(".", import.meta.url).pathname;
@@ -915,6 +916,11 @@ async function generateAlertMap(areas, evt = null) {
     const bd = findBoundary(area);
 
     if (bd?.boundary) {
+      // Skip polygons outside Israel
+      if (bd.coords && (bd.coords[0] < IL_BOUNDS.minLon || bd.coords[0] > IL_BOUNDS.maxLon || bd.coords[1] < IL_BOUNDS.minLat || bd.coords[1] > IL_BOUNDS.maxLat)) {
+        console.warn(`[map] "${area}" → SKIPPED polygon (outside Israel: [${bd.coords}])`);
+        return;
+      }
       // Skip if this boundary was already rendered (e.g. Tel Aviv subdivisions)
       const boundaryKey = bd.name || area;
       if (renderedBoundaries.has(boundaryKey)) {
@@ -940,6 +946,10 @@ async function generateAlertMap(areas, evt = null) {
     } else {
       // Render as circle area for settlements <10K (3km radius — visible at any zoom)
       const coord = fuzzyMatch(area) || CITY_COORDS[area];
+      if (coord && (coord[0] < IL_BOUNDS.minLon || coord[0] > IL_BOUNDS.maxLon || coord[1] < IL_BOUNDS.minLat || coord[1] > IL_BOUNDS.maxLat)) {
+        console.warn(`[map] "${area}" → SKIPPED circle (outside Israel: [${coord}])`);
+        return;
+      }
       if (coord) {
         console.log(`[map] "${area}" → CIRCLE at [${coord}] (${bd ? `pop=${bd.population}, no boundary` : "no boundary data"}, fill=${colors.fill})`);
         map.addCircle({
@@ -1220,33 +1230,16 @@ async function updateEventMessage(evt) {
     if (result?.ok) {
       evt.lastTextMessageId = result.result.message_id;
 
-      // Detect discussion thread for this channel post
+      // Register for thread detection — pollTelegramCommands will find the auto-forward
       if (!evt.isTest && TELEGRAM_DISCUSSION_ID) {
-        await new Promise(r => setTimeout(r, 2000));
-        try {
-          const updRes = await fetch(`${TELEGRAM_API}/getUpdates?offset=${lastUpdateId + 1}&timeout=3`, {
-            signal: AbortSignal.timeout(6000),
-          });
-          const updData = await updRes.json();
-          if (updData.ok && updData.result) {
-            for (const upd of updData.result) {
-              lastUpdateId = upd.update_id;
-              const m = upd.message;
-              if (!m) continue;
-              const cid = m.chat?.id?.toString();
-              if (cid === TELEGRAM_DISCUSSION_ID) {
-                evt.discussionThreadId = m.message_thread_id || m.message_id;
-                console.log(`[discussion] thread found: ${evt.discussionThreadId} (msg=${m.message_id}, is_auto_fwd=${m.is_automatic_forward}, sender=${m.sender_chat?.type})`);
-                break;
-              }
-            }
+        pendingThreadDetection.set(evt.lastTextMessageId, evt);
+        console.log(`[discussion] registered msg ${evt.lastTextMessageId} for thread detection`);
+        setTimeout(() => {
+          if (pendingThreadDetection.has(evt.lastTextMessageId)) {
+            pendingThreadDetection.delete(evt.lastTextMessageId);
+            console.log(`[discussion] thread detection timeout for msg ${evt.lastTextMessageId}`);
           }
-          if (!evt.discussionThreadId) {
-            console.log(`[discussion] thread NOT found after scanning updates`);
-          }
-        } catch (e) {
-          console.warn(`[discussion] thread detection failed: ${e.message}`);
-        }
+        }, 30000);
       }
     }
   }
@@ -1879,6 +1872,23 @@ async function pollTelegramCommands() {
         }
 
         continue;
+      }
+
+      // Detect auto-forwarded channel posts in discussion group
+      const fwdMsg = update.message;
+      if (fwdMsg && pendingThreadDetection.size > 0) {
+        const fwdChatId = fwdMsg.chat?.id?.toString();
+        if (fwdChatId === TELEGRAM_DISCUSSION_ID) {
+          const origMsgId = fwdMsg.forward_from_message_id || fwdMsg.forward_origin?.message_id;
+          if (origMsgId && pendingThreadDetection.has(origMsgId)) {
+            const pendingEvt = pendingThreadDetection.get(origMsgId);
+            pendingEvt.discussionThreadId = fwdMsg.message_thread_id || fwdMsg.message_id;
+            pendingThreadDetection.delete(origMsgId);
+            console.log(`[discussion] thread found: ${pendingEvt.discussionThreadId} for channel msg ${origMsgId}`);
+            continue;
+          }
+          console.log(`[discussion] group update: msg=${fwdMsg.message_id}, is_auto_fwd=${fwdMsg.is_automatic_forward}, sender=${fwdMsg.sender_chat?.type}, fwd_msg=${fwdMsg.forward_from_message_id}`);
+        }
       }
 
       const umsg = update.message;
