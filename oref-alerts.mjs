@@ -1113,9 +1113,6 @@ async function sendTelegramPhoto(filePath, caption, chatId = TELEGRAM_CHANNEL_ID
     form.append("photo", blob, "map.png");
     form.append("caption", caption);
     form.append("parse_mode", "HTML");
-    if (chatId === TELEGRAM_CHANNEL_ID && BOOM_BUTTONS) {
-      form.append("reply_markup", JSON.stringify(BOOM_BUTTONS));
-    }
 
     const res = await fetch(`${TELEGRAM_API}/sendPhoto`, { method: "POST", body: form });
     const result = await res.json();
@@ -1308,9 +1305,9 @@ async function updateEventMessage(evt) {
   let msg = buildEventMessage(evt);
   if (evt.isTest) msg = `🧪 <b>[טסט — אין להסתמך על הודעה זו]</b>\n${msg}`;
   if (evt.lastTextMessageId) {
-    await sendTelegram(msg, TELEGRAM_CHANNEL_ID, { editMessageId: evt.lastTextMessageId });
+    await sendTelegram(msg, TELEGRAM_CHANNEL_ID, { editMessageId: evt.lastTextMessageId, replyMarkup: BOOM_BUTTONS });
   } else {
-    const result = await sendTelegram(msg, TELEGRAM_CHANNEL_ID);
+    const result = await sendTelegram(msg, TELEGRAM_CHANNEL_ID, { replyMarkup: BOOM_BUTTONS });
     if (result?.ok) {
       evt.lastTextMessageId = result.result.message_id;
 
@@ -1383,7 +1380,6 @@ async function sendDiscussionUpdate(evt, updateType, details, alert = null) {
   }
 
   let msg = `${emoji} <b>עדכון ${time} — ${label}</b>\n`;
-  msg += `─────────────────────\n`;
 
   if (details) {
     msg += `${details}\n`;
