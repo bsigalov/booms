@@ -714,13 +714,7 @@ function formatRiskMessage(alertCoords, alertRegions, alertSettlements) {
   }
 
   return (
-    `\n\n🏠 <b>ניתוח סיכון ל${HOME_NAME}:</b>\n` +
-    `📏 ${risk.closestDist} ק״מ | 🧭 ${risk.dir} | 📐 ${risk.ellipse.area} קמ״ר\n\n` +
-    `📊 <b>הסתברויות:</b>\n` +
-    `${pEmoji(p.alert)} אזעקה: ${p.alert}%\n` +
-    `${pEmoji(p.impact)} נפילת טיל: ${p.impact}%\n` +
-    `${pEmoji(p.debris)} נפילת רסיס: ${p.debris}%\n` +
-    `${pEmoji(p.boom)} בומים: ${p.boom}%` +
+    `\n\n🏠 ${HOME_NAME}: ${risk.closestDist} ק״מ ${risk.dir} | ${pEmoji(p.alert)} ${p.alert}% | טיל ${p.impact}% | רסיס ${p.debris}% | בום ${p.boom}%` +
     expansionNote
   );
 }
