@@ -829,28 +829,31 @@ async function generateAlertMap(areas, evt = null) {
   await ensureMarkers();
   if (areas.length === 0) return null;
 
-  // Calculate bounding box of alert settlements for explicit center + zoom
-  const areaCoords = areas.map(a => fuzzyMatch(a) || CITY_COORDS[a]).filter(Boolean);
+  // Israel geographic bounds — map never shows outside these
+  const IL_BOUNDS = { minLon: 34.2, maxLon: 35.9, minLat: 29.4, maxLat: 33.4 };
+
+  // Calculate bounding box — only include coords within Israel
+  const areaCoords = areas.map(a => fuzzyMatch(a) || CITY_COORDS[a]).filter(Boolean)
+    .filter(c => c[0] >= IL_BOUNDS.minLon && c[0] <= IL_BOUNDS.maxLon && c[1] >= IL_BOUNDS.minLat && c[1] <= IL_BOUNDS.maxLat);
   if (areaCoords.length === 0) return null;
 
   const lons = areaCoords.map(c => c[0]);
   const lats = areaCoords.map(c => c[1]);
   const center = [
-    (Math.min(...lons) + Math.max(...lons)) / 2,
-    (Math.min(...lats) + Math.max(...lats)) / 2,
+    Math.max(IL_BOUNDS.minLon, Math.min(IL_BOUNDS.maxLon, (Math.min(...lons) + Math.max(...lons)) / 2)),
+    Math.max(IL_BOUNDS.minLat, Math.min(IL_BOUNDS.maxLat, (Math.min(...lats) + Math.max(...lats)) / 2)),
   ];
   const spanLon = Math.max(...lons) - Math.min(...lons);
   const spanLat = Math.max(...lats) - Math.min(...lats);
   const span = Math.max(spanLon, spanLat);
 
-  // Choose zoom based on geographic span (degrees → zoom level)
+  // Choose zoom — minimum 9 so map never shows outside Israel
   let zoom;
   if (span < 0.03) zoom = 13;       // ~3km — single settlement
   else if (span < 0.1) zoom = 12;   // ~10km — small cluster
   else if (span < 0.25) zoom = 11;  // ~25km — city region
   else if (span < 0.5) zoom = 10;   // ~50km — district
-  else if (span < 1.0) zoom = 9;    // ~100km — large area
-  else zoom = 8;                     // >100km — country scale
+  else zoom = 9;                     // >50km — max zoom out (still within Israel)
 
   const map = new StaticMaps({
     width: 1280,
