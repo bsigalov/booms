@@ -1106,13 +1106,16 @@ async function sendTelegramPhoto(filePath, caption, chatId = TELEGRAM_CHANNEL_ID
       return null;
     }
 
-    // Send new photo
+    // Send new photo with boom button
     console.log(`[telegram] sendPhoto → chat=${chatId} caption="${caption}"`);
     const form = new FormData();
     form.append("chat_id", chatId);
     form.append("photo", blob, "map.png");
     form.append("caption", caption);
     form.append("parse_mode", "HTML");
+    if (chatId === TELEGRAM_CHANNEL_ID && BOOM_BUTTONS) {
+      form.append("reply_markup", JSON.stringify(BOOM_BUTTONS));
+    }
 
     const res = await fetch(`${TELEGRAM_API}/sendPhoto`, { method: "POST", body: form });
     const result = await res.json();
@@ -1408,13 +1411,6 @@ async function sendDiscussionUpdate(evt, updateType, details, alert = null) {
     opts.replyToMsgId = evt.discussionThreadId; // reply_to_message_id, NOT message_thread_id
   }
   await sendTelegram(msg, TELEGRAM_DISCUSSION_ID, opts);
-
-  if (BOOM_BUTTONS && evt.discussionThreadId) {
-    await sendTelegram("💥 שמעתם בום? דווחו כאן:", TELEGRAM_DISCUSSION_ID, {
-      replyMarkup: BOOM_BUTTONS,
-      replyToMsgId: evt.discussionThreadId,
-    });
-  }
 }
 
 // Poll alerts with multi-event lifecycle
