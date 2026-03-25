@@ -1841,7 +1841,7 @@ async function pollTelegramCommands() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         offset: lastUpdateId + 1,
-        timeout: 5,
+        timeout: 0,
         allowed_updates: ["message", "callback_query", "channel_post", "edited_channel_post"],
       }),
       signal: AbortSignal.timeout(10000),
