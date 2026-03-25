@@ -1834,7 +1834,8 @@ const TELEGRAM_UPDATES_URL = `${TELEGRAM_API}/getUpdates`;
 
 async function pollTelegramCommands() {
   try {
-    const res = await fetch(`${TELEGRAM_UPDATES_URL}?offset=${lastUpdateId + 1}&timeout=5`, {
+    // allowed_updates MUST include "message" to receive auto-forwarded channel posts in discussion group
+    const res = await fetch(`${TELEGRAM_UPDATES_URL}?offset=${lastUpdateId + 1}&timeout=5&allowed_updates=${encodeURIComponent(JSON.stringify(["message","callback_query","channel_post","edited_channel_post"]))}`, {
       signal: AbortSignal.timeout(10000),
     });
     const data = await res.json();
@@ -1876,18 +1877,26 @@ async function pollTelegramCommands() {
 
       // Detect auto-forwarded channel posts in discussion group
       const fwdMsg = update.message;
-      if (fwdMsg && pendingThreadDetection.size > 0) {
+      if (fwdMsg) {
         const fwdChatId = fwdMsg.chat?.id?.toString();
         if (fwdChatId === TELEGRAM_DISCUSSION_ID) {
-          const origMsgId = fwdMsg.forward_from_message_id || fwdMsg.forward_origin?.message_id;
-          if (origMsgId && pendingThreadDetection.has(origMsgId)) {
-            const pendingEvt = pendingThreadDetection.get(origMsgId);
-            pendingEvt.discussionThreadId = fwdMsg.message_thread_id || fwdMsg.message_id;
-            pendingThreadDetection.delete(origMsgId);
-            console.log(`[discussion] thread found: ${pendingEvt.discussionThreadId} for channel msg ${origMsgId}`);
-            continue;
+          // Check if this is an auto-forwarded channel post (per Telegram Bot API guide)
+          if (fwdMsg.is_automatic_forward) {
+            const origMsgId = fwdMsg.forward_origin?.message_id || fwdMsg.forward_from_message_id;
+            console.log(`[discussion] auto-forward detected: discussion_msg=${fwdMsg.message_id}, channel_msg=${origMsgId}, thread=${fwdMsg.message_thread_id}`);
+
+            if (origMsgId && pendingThreadDetection.has(origMsgId)) {
+              const pendingEvt = pendingThreadDetection.get(origMsgId);
+              pendingEvt.discussionThreadId = fwdMsg.message_id; // the discussion msg ID IS the thread ID
+              pendingThreadDetection.delete(origMsgId);
+              console.log(`[discussion] LINKED: thread=${pendingEvt.discussionThreadId} for event "${pendingEvt.regionKey}"`);
+            }
+            continue; // don't process auto-forwards as commands
           }
-          console.log(`[discussion] group update: msg=${fwdMsg.message_id}, is_auto_fwd=${fwdMsg.is_automatic_forward}, sender=${fwdMsg.sender_chat?.type}, fwd_msg=${fwdMsg.forward_from_message_id}`);
+          // Log other discussion group messages for debugging
+          if (pendingThreadDetection.size > 0) {
+            console.log(`[discussion] group msg: id=${fwdMsg.message_id}, is_auto_fwd=${fwdMsg.is_automatic_forward}, sender=${fwdMsg.sender_chat?.type}`);
+          }
         }
       }
 
@@ -2186,6 +2195,9 @@ await fetch(`${TELEGRAM_API}/setMyCommands`, {
     ],
   }),
 });
+
+// Clear any stale webhook before starting polling (they're mutually exclusive)
+fetch(`${TELEGRAM_API}/deleteWebhook`).then(() => console.log("Webhook cleared")).catch(() => {});
 
 console.log("מאזין להתרעות פיקוד העורף... (Ctrl+C לעצירה)");
 console.log(`תדירות: כל ${POLL_INTERVAL / 1000} שנייה`);
