@@ -1041,7 +1041,8 @@ async function sendTelegram(message, chatId = TELEGRAM_CHANNEL_ID, opts = {}) {
     }
 
     const replyInfo = body.reply_parameters ? ` reply_to=${body.reply_parameters.message_id} in chat=${body.reply_parameters.chat_id || 'same'}` : '';
-    console.log(`[telegram] sendMessage → chat=${chatId} (${message.length} chars)${replyInfo}`);
+    const threadInfo = body.message_thread_id ? ` thread=${body.message_thread_id}` : '';
+    console.log(`[telegram] sendMessage → chat=${chatId} (${message.length} chars)${replyInfo}${threadInfo}`);
     const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1230,19 +1231,54 @@ async function updateEventMessage(evt) {
     if (result?.ok) {
       evt.lastTextMessageId = result.result.message_id;
 
-      // Register for thread detection — pollTelegramCommands will find the auto-forward
-      if (!evt.isTest && TELEGRAM_DISCUSSION_ID) {
-        pendingThreadDetection.set(evt.lastTextMessageId, evt);
-        console.log(`[discussion] registered msg ${evt.lastTextMessageId} for thread detection`);
-        try { appendFileSync(`${DATA_DIR}/poll-updates.log`, `${new Date().toISOString()} REGISTERED channel_msg=${evt.lastTextMessageId} discussion_id=${TELEGRAM_DISCUSSION_ID}\n`); } catch {}
-        setTimeout(() => {
-          if (pendingThreadDetection.has(evt.lastTextMessageId)) {
-            pendingThreadDetection.delete(evt.lastTextMessageId);
-            console.log(`[discussion] thread detection timeout for msg ${evt.lastTextMessageId}`);
-          }
-        }, 30000);
+      // Find the auto-forwarded message in the discussion group
+      // This is the ONLY way to get the thread ID for posting comments
+      if (TELEGRAM_DISCUSSION_ID) {
+        await findDiscussionThread(evt);
       }
     }
+  }
+}
+
+// After sending a channel post, find the corresponding auto-forwarded message
+// in the discussion group by polling getUpdates directly.
+async function findDiscussionThread(evt) {
+  const channelMsgId = evt.lastTextMessageId;
+  console.log(`[discussion] looking for auto-forward of channel msg ${channelMsgId}...`);
+
+  // Wait for Telegram to create the auto-forward
+  await new Promise(r => setTimeout(r, 3000));
+
+  // Poll recent updates — look for auto-forwarded message from our channel
+  try {
+    const res = await fetch(`${TELEGRAM_API}/getUpdates`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ offset: -10, timeout: 3, allowed_updates: ["message"] }),
+      signal: AbortSignal.timeout(8000),
+    });
+    const data = await res.json();
+    if (!data.ok || !data.result) {
+      console.log(`[discussion] getUpdates failed: ${data.description || "no data"}`);
+      return;
+    }
+
+    for (const u of data.result) {
+      lastUpdateId = Math.max(lastUpdateId, u.update_id);
+      const m = u.message;
+      if (!m || !m.is_automatic_forward) continue;
+      if (m.chat?.id?.toString() !== TELEGRAM_DISCUSSION_ID) continue;
+
+      const origMsgId = m.forward_origin?.message_id || m.forward_from_message_id;
+      if (origMsgId === channelMsgId) {
+        evt.discussionThreadId = m.message_id;
+        console.log(`[discussion] FOUND thread=${m.message_id} for channel msg ${channelMsgId}`);
+        return;
+      }
+    }
+    console.log(`[discussion] auto-forward not found for channel msg ${channelMsgId}`);
+  } catch (e) {
+    console.warn(`[discussion] error: ${e.message}`);
   }
 }
 
@@ -1286,25 +1322,18 @@ async function sendDiscussionUpdate(evt, updateType, details, alert = null) {
     msg += `\n📊 סיכום: ${evt.settlements.size} ישובים, ${evt.waves.length} גלים, ${min}:${String(sec).padStart(2, "0")} דקות`;
   }
 
-  // Use thread ID if detected, otherwise cross-chat reply as fallback
+  // Reply to the auto-forwarded message in discussion group (appears as comment on channel post)
   const opts = {};
   if (evt.discussionThreadId) {
-    opts.threadId = evt.discussionThreadId;
-  } else if (evt.lastTextMessageId) {
-    opts.replyToMsgId = evt.lastTextMessageId;
-    opts.replyChatId = TELEGRAM_CHANNEL_ID;
+    opts.replyToMsgId = evt.discussionThreadId; // reply_to_message_id, NOT message_thread_id
   }
   await sendTelegram(msg, TELEGRAM_DISCUSSION_ID, opts);
 
-  if (BOOM_BUTTONS) {
-    const boomOpts = { replyMarkup: BOOM_BUTTONS };
-    if (evt.discussionThreadId) {
-      boomOpts.threadId = evt.discussionThreadId;
-    } else if (evt.lastTextMessageId) {
-      boomOpts.replyToMsgId = evt.lastTextMessageId;
-      boomOpts.replyChatId = TELEGRAM_CHANNEL_ID;
-    }
-    await sendTelegram("💥 שמעתם בום? דווחו כאן:", TELEGRAM_DISCUSSION_ID, boomOpts);
+  if (BOOM_BUTTONS && evt.discussionThreadId) {
+    await sendTelegram("💥 שמעתם בום? דווחו כאן:", TELEGRAM_DISCUSSION_ID, {
+      replyMarkup: BOOM_BUTTONS,
+      replyToMsgId: evt.discussionThreadId,
+    });
   }
 }
 
@@ -1902,7 +1931,9 @@ async function pollTelegramCommands() {
           // Check if this is an auto-forwarded channel post (per Telegram Bot API guide)
           if (fwdMsg.is_automatic_forward) {
             const origMsgId = fwdMsg.forward_origin?.message_id || fwdMsg.forward_from_message_id;
-            console.log(`[discussion] auto-forward detected: discussion_msg=${fwdMsg.message_id}, channel_msg=${origMsgId}, thread=${fwdMsg.message_thread_id}`);
+            const pendingKeys = [...pendingThreadDetection.keys()];
+            console.log(`[discussion] auto-forward: disc=${fwdMsg.message_id} chan=${origMsgId} thread=${fwdMsg.message_thread_id} pending=[${pendingKeys}]`);
+            try { appendFileSync(`${DATA_DIR}/poll-updates.log`, `${new Date().toISOString()} AUTO-FWD disc=${fwdMsg.message_id} chan=${origMsgId} thread=${fwdMsg.message_thread_id} pending=[${pendingKeys}]\n`); } catch {}
 
             if (origMsgId && pendingThreadDetection.has(origMsgId)) {
               const pendingEvt = pendingThreadDetection.get(origMsgId);
