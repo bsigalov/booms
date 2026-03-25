@@ -1847,7 +1847,11 @@ async function pollTelegramCommands() {
       signal: AbortSignal.timeout(10000),
     });
     const data = await res.json();
-    if (!data.ok || !data.result) return;
+    if (!data.ok) {
+      try { appendFileSync(`${DATA_DIR}/poll-updates.log`, `${new Date().toISOString()} ERROR: ${JSON.stringify(data)}\n`); } catch {}
+      return;
+    }
+    if (!data.result || data.result.length === 0) return;
 
     for (const update of data.result) {
       lastUpdateId = update.update_id;
