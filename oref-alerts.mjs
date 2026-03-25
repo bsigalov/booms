@@ -1844,6 +1844,11 @@ async function pollTelegramCommands() {
     for (const update of data.result) {
       lastUpdateId = update.update_id;
 
+      // Log every update type for debugging
+      const updKeys = Object.keys(update).filter(k => k !== 'update_id').join(',');
+      const updChat = update.message?.chat?.id || update.channel_post?.chat?.id || '';
+      console.log(`[poll] update ${update.update_id}: type=${updKeys} chat=${updChat}`);
+
       // Handle callback buttons (boom questionnaire)
       if (update.callback_query) {
         const cb = update.callback_query;
