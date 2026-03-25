@@ -1836,7 +1836,14 @@ const TELEGRAM_UPDATES_URL = `${TELEGRAM_API}/getUpdates`;
 async function pollTelegramCommands() {
   try {
     // allowed_updates MUST include "message" to receive auto-forwarded channel posts in discussion group
-    const res = await fetch(`${TELEGRAM_UPDATES_URL}?offset=${lastUpdateId + 1}&timeout=5&allowed_updates=${encodeURIComponent(JSON.stringify(["message","callback_query","channel_post","edited_channel_post"]))}`, {
+    const res = await fetch(TELEGRAM_UPDATES_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        offset: lastUpdateId + 1,
+        timeout: 5,
+        allowed_updates: ["message", "callback_query", "channel_post", "edited_channel_post"],
+      }),
       signal: AbortSignal.timeout(10000),
     });
     const data = await res.json();
