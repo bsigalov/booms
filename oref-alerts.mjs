@@ -306,12 +306,13 @@ function summarizeAreas(areas) {
   const majors = [];
 
   for (const area of areas) {
-    // Check region mapping (exact + fuzzy)
+    // Check region mapping — exact match or base-name-before-dash only
     if (REGION_MAP[area]) {
       regions.add(REGION_MAP[area]);
     } else {
-      for (const [key, region] of Object.entries(REGION_MAP)) {
-        if (area.includes(key)) { regions.add(region); break; }
+      const baseName = area.split(" - ")[0].trim();
+      if (baseName !== area && REGION_MAP[baseName]) {
+        regions.add(REGION_MAP[baseName]);
       }
     }
     // Check if major city (exact or partial)
@@ -848,17 +849,22 @@ async function generateAlertMap(areas, evt = null) {
   const spanLat = Math.max(...lats) - Math.min(...lats);
   const span = Math.max(spanLon, spanLat);
 
-  // Zoom for 1280px image: zoom N shows ~(360/2^N)*5 degrees
-  // zoom 10 ≈ 1.76° (Israel width), zoom 11 ≈ 0.88°, zoom 12 ≈ 0.44°
+  // Zoom: pick level that fits all settlements with margin
   let zoom;
-  if (span < 0.05) zoom = 13;       // ~5km — single settlement
-  else if (span < 0.15) zoom = 12;  // ~15km — small cluster
-  else if (span < 0.4) zoom = 11;   // ~40km — city region
-  else zoom = 10;                    // >40km — max zoom out (fills Israel width)
+  if (span < 0.05) zoom = 13;
+  else if (span < 0.15) zoom = 12;
+  else if (span < 0.4) zoom = 11;
+  else if (span < 1.0) zoom = 10;
+  else zoom = 9; // very large events (100+ settlements across Israel)
+
+  // Use portrait ratio for tall spans (north-south), landscape for wide
+  const isPortrait = spanLat > spanLon * 1.3;
+  const mapW = isPortrait ? 1024 : 1280;
+  const mapH = isPortrait ? 1280 : 1024;
 
   const map = new StaticMaps({
-    width: 1280,
-    height: 1280,
+    width: mapW,
+    height: mapH,
     paddingX: 40,
     paddingY: 40,
     tileUrl: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
@@ -1159,6 +1165,74 @@ let BOOM_BUTTONS = { inline_keyboard: [[
   }
 })();
 
+// Message style: A=minimal, B=clean, C=balanced, D=emoji-rich
+let messageStyle = "B";
+
+function buildEventMessageStyleA(evt) {
+  const now = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
+  const alertRegions = getAlertRegions(evt);
+  const regionStr = alertRegions.length > 0 ? alertRegions.join(", ") : summarizeAreas([...evt.settlements]);
+
+  const phaseLabel = { early_warning: "התרעה מוקדמת", alert: "אזעקה", waiting: "המתנה במרחב מוגן", ended: "אירוע הסתיים" }[evt.phase] || "";
+  const timeRange = evt.phase === "ended" ? `${evt.startTimeStr}–${now}` : evt.startTimeStr;
+
+  let msg = `<b>${phaseLabel} | ${regionStr}</b>\n${timeRange} | ${evt.settlements.size} ישובים | ${evt.waves.length} גלים`;
+
+  if (evt.riskMsg) {
+    // Compact risk: one line
+    msg += `\n\nרחובות: ${evt.riskMsg.replace(/\n/g, " ").replace(/<[^>]+>/g, "").trim().substring(0, 120)}`;
+  }
+
+  if (evt.history.length > 1 || evt.phase !== "early_warning") {
+    const lines = evt.history.map(h => `${h.time} — ${h.text.replace(/[⚠️🚨🟡✅]/g, "").trim()}`).join("\n");
+    msg += `\n\n${lines}`;
+  }
+  return msg;
+}
+
+function buildEventMessageStyleB(evt) {
+  const now = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
+  const alertRegions = getAlertRegions(evt);
+  const regionStr = alertRegions.length > 0 ? alertRegions.join(", ") : summarizeAreas([...evt.settlements]);
+
+  const phaseMap = { early_warning: "⚠️ התרעה מוקדמת", alert: "🔴 אזעקה", waiting: "🟡 המתנה", ended: "✅ הסתיים" };
+  const timeRange = evt.phase === "ended"
+    ? `${evt.startTimeStr}–${now} (${Math.floor((Date.now() - evt.startTime) / 60000)} דק')`
+    : evt.startTimeStr;
+
+  let msg = `${phaseMap[evt.phase] || ""} <b>${regionStr}</b>\n⏰ ${timeRange} — ${evt.settlements.size} ישובים`;
+
+  if (evt.riskMsg) msg += evt.riskMsg;
+
+  if (evt.history.length > 1 || evt.phase !== "early_warning") {
+    const lines = evt.history.map(h => `${h.time} ${h.text}`).join("\n");
+    msg += `\n\n<blockquote>${lines}</blockquote>`;
+  }
+  return msg;
+}
+
+function buildEventMessageStyleC(evt) {
+  const now = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
+  const alertRegions = getAlertRegions(evt);
+  const regionStr = alertRegions.length > 0 ? alertRegions.join(", ") : summarizeAreas([...evt.settlements]);
+
+  const phaseMap = { early_warning: "⚠️", alert: "🚨", waiting: "🟡", ended: "✅" };
+  const labelMap = { early_warning: "התרעה מוקדמת", alert: "אזעקה", waiting: "שהייה במקלטים", ended: "אירוע הסתיים" };
+  const timeRange = evt.phase === "ended"
+    ? `${evt.startTimeStr}–${now} (${Math.floor((Date.now() - evt.startTime) / 60000)} דק')`
+    : evt.startTimeStr;
+
+  let msg = `${phaseMap[evt.phase]} <b>${labelMap[evt.phase]} | ${regionStr}</b>\n⏰ ${timeRange} | ${evt.settlements.size} ישובים | ${evt.waves.length} גלים`;
+
+  if (evt.riskMsg) msg += evt.riskMsg;
+
+  if (evt.history.length > 1 || evt.phase !== "early_warning") {
+    const lines = evt.history.map(h => `${h.time} — ${h.text}`).join("\n");
+    msg += `\n\n<blockquote>📜 היסטוריה:\n${lines}</blockquote>`;
+  }
+  return msg;
+}
+
 function parseProtectionMinutes(desc) {
   const m = desc.match(/(\d+)\s*דקות/);
   if (m) return parseInt(m[1]);
@@ -1177,15 +1251,15 @@ function getAlertRegions(evt) {
   for (const s of alertSettlements) {
     if (REGION_MAP[s]) regions.add(REGION_MAP[s]);
     else {
-      for (const [key, region] of Object.entries(REGION_MAP)) {
-        if (s.includes(key)) { regions.add(region); break; }
-      }
+      const base = s.split(" - ")[0].trim();
+      if (base !== s && REGION_MAP[base]) regions.add(REGION_MAP[base]);
     }
   }
   return [...regions];
 }
 
-function buildEventMessage(evt) {
+// Style D: emoji-rich (original)
+function buildEventMessageStyleD(evt) {
   const now = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
   const allRegionsSummary = summarizeAreas([...evt.settlements]);
   const alertRegions = getAlertRegions(evt);
@@ -1208,17 +1282,23 @@ function buildEventMessage(evt) {
   }
 
   let msg = `${header}\n${timeLine}`;
-
-  if (evt.riskMsg) {
-    msg += evt.riskMsg;
-  }
+  if (evt.riskMsg) msg += evt.riskMsg;
 
   if (evt.history.length > 1 || evt.phase !== "early_warning") {
     const lines = evt.history.map(h => `${h.time} — ${h.text}`).join("\n");
     msg += `\n\n<blockquote>📜 היסטוריה:\n${lines}</blockquote>`;
   }
-
   return msg;
+}
+
+function buildEventMessage(evt) {
+  switch (messageStyle) {
+    case "A": return buildEventMessageStyleA(evt);
+    case "B": return buildEventMessageStyleB(evt);
+    case "C": return buildEventMessageStyleC(evt);
+    case "D": return buildEventMessageStyleD(evt);
+    default: return buildEventMessageStyleB(evt);
+  }
 }
 
 async function updateEventMessage(evt) {
@@ -1536,8 +1616,9 @@ async function fetchAlerts() {
       const alertRegions = new Set();
       for (const area of allAreas) {
         if (REGION_MAP[area]) alertRegions.add(REGION_MAP[area]);
-        for (const [key, region] of Object.entries(REGION_MAP)) {
-          if (area.includes(key)) { alertRegions.add(region); break; }
+        else {
+          const base = area.split(" - ")[0].trim();
+          if (base !== area && REGION_MAP[base]) alertRegions.add(REGION_MAP[base]);
         }
       }
       evt.riskMsg = formatRiskMessage(alertCoords, alertRegions, allAreas);
@@ -1898,6 +1979,17 @@ async function pollTelegramCommands() {
         const cbData = cb.data;
         const userChatId = cb.from?.id?.toString();
 
+        // Style selection buttons
+        if (cbData?.startsWith("style_")) {
+          const style = cbData.replace("style_", "");
+          if (["A", "B", "C", "D"].includes(style)) {
+            messageStyle = style;
+            const names = { A: "Minimal", B: "Clean Modern", C: "Balanced", D: "Emoji-Rich" };
+            await answerCallback(cb.id, `סגנון: ${style} — ${names[style]}`);
+          }
+          continue;
+        }
+
         // "שמעתי בום!" button from channel → start questionnaire in private chat
         if (cbData === "fb_boom_start") {
           await answerCallback(cb.id, "💥 עובר לצ'אט פרטי...");
@@ -2027,12 +2119,36 @@ async function pollTelegramCommands() {
         }
 
         await sendTelegram(statusMsg, TELEGRAM_CHAT_ID);
+      } else if (text?.startsWith("/style")) {
+        const arg = text.split(" ")[1]?.toUpperCase();
+        if (arg && ["A", "B", "C", "D"].includes(arg)) {
+          messageStyle = arg;
+          const names = { A: "Minimal", B: "Clean Modern", C: "Balanced", D: "Emoji-Rich" };
+          await sendTelegram(`✅ סגנון שונה ל: <b>${arg} — ${names[arg]}</b>\nשלח /test לראות`, TELEGRAM_CHAT_ID);
+        } else {
+          const current = messageStyle;
+          await sendTelegram(
+            `🎨 <b>בחר סגנון הודעות:</b>\nנוכחי: <b>${current}</b>`,
+            TELEGRAM_CHAT_ID,
+            { replyMarkup: { inline_keyboard: [
+              [
+                { text: `${current === "A" ? "✓ " : ""}A Minimal`, callback_data: "style_A" },
+                { text: `${current === "B" ? "✓ " : ""}B Clean`, callback_data: "style_B" },
+              ],
+              [
+                { text: `${current === "C" ? "✓ " : ""}C Balanced`, callback_data: "style_C" },
+                { text: `${current === "D" ? "✓ " : ""}D Emoji`, callback_data: "style_D" },
+              ],
+            ] } }
+          );
+        }
       } else if (text === "/help") {
         await sendTelegram(
           `📋 <b>פקודות זמינות:</b>\n\n` +
-          `/test — סימולציה של אירוע אמיתי (3 דקות)\n` +
+          `/test — סימולציה של אירוע אמיתי\n` +
           `/stop — עצור סימולציה פעילה\n` +
-          `/status — בדוק שהבוט פעיל וזמן ריצה\n` +
+          `/status — מצב הבוט\n` +
+          `/style — שנה סגנון הודעות (A/B/C/D)\n` +
           `/help — הצג תפריט זה`,
           TELEGRAM_CHAT_ID
         );
