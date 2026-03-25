@@ -1234,6 +1234,7 @@ async function updateEventMessage(evt) {
       if (!evt.isTest && TELEGRAM_DISCUSSION_ID) {
         pendingThreadDetection.set(evt.lastTextMessageId, evt);
         console.log(`[discussion] registered msg ${evt.lastTextMessageId} for thread detection`);
+        try { appendFileSync(`${DATA_DIR}/poll-updates.log`, `${new Date().toISOString()} REGISTERED channel_msg=${evt.lastTextMessageId} discussion_id=${TELEGRAM_DISCUSSION_ID}\n`); } catch {}
         setTimeout(() => {
           if (pendingThreadDetection.has(evt.lastTextMessageId)) {
             pendingThreadDetection.delete(evt.lastTextMessageId);
@@ -1844,10 +1845,12 @@ async function pollTelegramCommands() {
     for (const update of data.result) {
       lastUpdateId = update.update_id;
 
-      // Log every update type for debugging
+      // Log every update to persistent file for debugging
       const updKeys = Object.keys(update).filter(k => k !== 'update_id').join(',');
       const updChat = update.message?.chat?.id || update.channel_post?.chat?.id || '';
-      console.log(`[poll] update ${update.update_id}: type=${updKeys} chat=${updChat}`);
+      const logLine = `${new Date().toISOString()} update=${update.update_id} type=${updKeys} chat=${updChat} is_auto_fwd=${update.message?.is_automatic_forward} fwd_origin=${update.message?.forward_origin?.type}\n`;
+      console.log(`[poll] ${logLine.trim()}`);
+      try { appendFileSync(`${DATA_DIR}/poll-updates.log`, logLine); } catch {}
 
       // Handle callback buttons (boom questionnaire)
       if (update.callback_query) {
