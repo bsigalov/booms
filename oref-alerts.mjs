@@ -847,13 +847,13 @@ async function generateAlertMap(areas, evt = null) {
   const spanLat = Math.max(...lats) - Math.min(...lats);
   const span = Math.max(spanLon, spanLat);
 
-  // Choose zoom — minimum 9 so map never shows outside Israel
+  // Zoom for 1280px image: zoom N shows ~(360/2^N)*5 degrees
+  // zoom 10 ≈ 1.76° (Israel width), zoom 11 ≈ 0.88°, zoom 12 ≈ 0.44°
   let zoom;
-  if (span < 0.03) zoom = 13;       // ~3km — single settlement
-  else if (span < 0.1) zoom = 12;   // ~10km — small cluster
-  else if (span < 0.25) zoom = 11;  // ~25km — city region
-  else if (span < 0.5) zoom = 10;   // ~50km — district
-  else zoom = 9;                     // >50km — max zoom out (still within Israel)
+  if (span < 0.05) zoom = 13;       // ~5km — single settlement
+  else if (span < 0.15) zoom = 12;  // ~15km — small cluster
+  else if (span < 0.4) zoom = 11;   // ~40km — city region
+  else zoom = 10;                    // >40km — max zoom out (fills Israel width)
 
   const map = new StaticMaps({
     width: 1280,
