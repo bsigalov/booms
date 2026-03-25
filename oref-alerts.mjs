@@ -1305,9 +1305,9 @@ async function updateEventMessage(evt) {
   let msg = buildEventMessage(evt);
   if (evt.isTest) msg = `🧪 <b>[טסט — אין להסתמך על הודעה זו]</b>\n${msg}`;
   if (evt.lastTextMessageId) {
-    await sendTelegram(msg, TELEGRAM_CHANNEL_ID, { editMessageId: evt.lastTextMessageId, replyMarkup: BOOM_BUTTONS });
+    await sendTelegram(msg, TELEGRAM_CHANNEL_ID, { editMessageId: evt.lastTextMessageId });
   } else {
-    const result = await sendTelegram(msg, TELEGRAM_CHANNEL_ID, { replyMarkup: BOOM_BUTTONS });
+    const result = await sendTelegram(msg, TELEGRAM_CHANNEL_ID);
     if (result?.ok) {
       evt.lastTextMessageId = result.result.message_id;
 
@@ -1404,8 +1404,9 @@ async function sendDiscussionUpdate(evt, updateType, details, alert = null) {
   // Reply to the auto-forwarded message in discussion group (appears as comment on channel post)
   const opts = {};
   if (evt.discussionThreadId) {
-    opts.replyToMsgId = evt.discussionThreadId; // reply_to_message_id, NOT message_thread_id
+    opts.replyToMsgId = evt.discussionThreadId;
   }
+  opts.replyMarkup = BOOM_BUTTONS;
   await sendTelegram(msg, TELEGRAM_DISCUSSION_ID, opts);
 }
 
