@@ -7,6 +7,8 @@
     "start": "node oref-alerts.mjs"
   },
   "dependencies": {
+    "proj4": "^2.20.4",
+    "shapefile": "^0.6.6",
     "staticmaps": "^1.13.1"
   }
 }
