@@ -707,6 +707,8 @@ function analyzeRisk(alertCoords, alertRegions, alertSettlements, alertCat) {
 }
 
 function formatRiskMessage(alertCoords, alertRegions, alertSettlements, alertCat) {
+  // Skip risk analysis for drone attacks (cat=6) — not relevant
+  if (String(alertCat) === "6") return "";
   const risk = analyzeRisk(alertCoords, alertRegions, alertSettlements, alertCat);
   if (!risk) return "";
 
