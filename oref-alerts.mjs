@@ -393,8 +393,6 @@ async function geocode(place) {
 // --- Advanced Risk Analysis Engine ---
 const HOME_COORD = JSON.parse(process.env.HOME_COORD || "[34.8113, 31.8928]");
 const HOME_NAME = process.env.HOME_NAME || "רחובות";
-const BOOM_RADIUS_KM = 20;
-const DEBRIS_REACH_KM = 20;
 
 // Load correlation index (rebuilt periodically)
 let correlationIndex = { regionCorrelation: {}, impactGivenAlert: { pImpact: 0.18 }, debrisGivenAlert: { pDebris: 0.30 } };
@@ -576,96 +574,97 @@ function trackExpansion(currentCoords) {
   return { expandingTowardHome, velocity: Math.round(velocity * 10) / 10, eta: Math.round(eta) };
 }
 
-// --- Four Probability Functions ---
+// --- Risk Model: Probability Functions (radius-based) ---
+// All probabilities mean "within X km radius of home", not "at exact location"
+// Base rates from published IDF data + research (see docs/risk-model.md)
 
 function clamp(v, min, max) { return Math.min(max, Math.max(min, v)); }
 
-function calculatePAlert(alertRegions, alertSettlements, ellipse, homePosition, expansion) {
-  // Rule 1: Already alerted
+// Interception rates by alert category
+const INTERCEPTION_RATE = {
+  "1": 0.85,  // cat=1 rockets/missiles → Iron Dome ~85%
+  "6": 0.60,  // cat=6 drones/UAVs → lower interception rate
+};
+const DEBRIS_REACH_KM = 10;     // interception debris can fall within 10km
+const IMPACT_RADIUS_KM = 5;     // "impact within 5km"
+const BOOM_RADIUS_KM = 25;      // "audible boom within 25km"
+
+function getInterceptionRate(alertCat) {
+  return INTERCEPTION_RATE[String(alertCat)] || 0.80;
+}
+
+function calculatePAlert(alertRegions, alertSettlements, ellipse, homePosition, expansion, closestDist) {
+  // Already alerted at home
   for (const s of alertSettlements) {
     if (s.includes(HOME_NAME) || HOME_NAME.includes(s)) return 1.0;
   }
-  // Check home region
   const homeRegion = REGION_MAP[HOME_NAME];
   if (homeRegion && alertRegions.has(homeRegion)) return 0.95;
 
-  // Factor A: Region co-occurrence (40%)
-  let pRegion = 0;
-  for (const region of alertRegions) {
-    const corr = correlationIndex.regionCorrelation?.[region];
-    if (corr && corr.probability > pRegion) pRegion = corr.probability;
+  // Distance-based decay (primary factor)
+  let pDistance;
+  if (closestDist < 10) pDistance = 0.80;
+  else if (closestDist < 30) pDistance = 0.50 - (closestDist - 10) * 0.015;
+  else if (closestDist < 80) pDistance = 0.20 - (closestDist - 30) * 0.003;
+  else pDistance = Math.max(0.01, 0.05 - (closestDist - 80) * 0.0005);
+
+  // Expansion boost: if alerts are expanding toward home
+  let expansionBoost = 0;
+  if (expansion.expandingTowardHome && expansion.velocity > 0.3) {
+    expansionBoost = clamp(0.15 + expansion.velocity * 0.05, 0, 0.35);
   }
 
-  // Factor B: Ellipse proximity (30%)
-  const posFactors = { END: 0.9, START: 0.85, CENTER: 0.95, NEAR: 0.4, FAR: 0 };
-  let pEllipse = posFactors[homePosition.positionType] ?? 0;
-  if (homePosition.positionType === "FAR") {
-    pEllipse = Math.max(0, 0.2 - homePosition.normalizedDistance * 0.05);
-  }
+  // Event size boost: large attacks spread wider
+  const sizeBoost = alertSettlements.length > 50 ? 0.10 :
+                    alertSettlements.length > 20 ? 0.05 : 0;
 
-  // Factor C: Expansion direction (30%)
-  let pExpansion = 0.1;
-  if (expansion.expandingTowardHome) {
-    pExpansion = clamp(0.3 + expansion.velocity * 0.1, 0, 0.8);
-  } else if (expansion.velocity > 0.5) {
-    pExpansion = Math.max(0.05, 0.2 - expansion.velocity * 0.05);
-  }
-
-  return clamp(0.4 * pRegion + 0.3 * pEllipse + 0.3 * pExpansion, 0, 1);
+  return clamp(pDistance + expansionBoost + sizeBoost, 0, 1);
 }
 
-function calculatePImpact(pAlert, ellipse, homePosition) {
-  if (pAlert < 0.1) return pAlert * 0.001;
+function calculatePImpact(pAlert, closestDist, alertCat) {
+  // P(impact within 5km) = P(alarm) × P(not intercepted) × P(hits populated area) × P(within 5km | populated)
+  const pNotIntercepted = 1 - getInterceptionRate(alertCat);
+  const pHitsPopulated = 0.15;  // ~15% of unintercepted projectiles hit populated areas
+  const pWithin5km = closestDist < 5 ? 0.30 :
+                     closestDist < 15 ? 0.15 :
+                     closestDist < 30 ? 0.08 : 0.03;
 
-  const baseRate = correlationIndex.impactGivenAlert?.pImpact ?? 0.18;
-
-  const posFactors = { END: 1.5, CENTER: 1.0, START: 0.3, NEAR: 0.15, FAR: 0.02 };
-  const positionFactor = posFactors[homePosition.positionType] ?? 0.02;
-
-  // Small alert zone = precise missile = higher local risk
-  const area = Math.PI * ellipse.semiMajor * ellipse.semiMinor;
-  const sizeFactor = area < 500 ? 1.3 : area < 2000 ? 1.0 : 0.7;
-
-  return clamp(pAlert * baseRate * positionFactor * sizeFactor, 0, 1);
+  return clamp(pAlert * pNotIntercepted * pHitsPopulated * pWithin5km, 0, 1);
 }
 
-function calculatePDebris(pAlert, ellipse, homePosition, closestDist) {
-  const baseRate = correlationIndex.debrisGivenAlert?.pDebris ?? 0.30;
+function calculatePDebris(pAlert, closestDist, alertCat) {
+  // P(debris within 5km) = P(alarm) × P(intercepted) × P(notable debris) × P(within range)
+  const pIntercepted = getInterceptionRate(alertCat);
+  const pNotableDebris = 0.30;  // ~30% of interceptions produce debris that reaches ground
+  const pWithinRange = closestDist < DEBRIS_REACH_KM
+    ? 0.25 * (1 - closestDist / DEBRIS_REACH_KM)
+    : closestDist < 20 ? 0.05 : 0.01;
 
-  const posFactors = { START: 1.8, CENTER: 1.2, END: 0.6, NEAR: 0.8, FAR: 0 };
-  let positionFactor = posFactors[homePosition.positionType] ?? 0;
-  if (homePosition.positionType === "FAR" && closestDist < DEBRIS_REACH_KM) {
-    positionFactor = 0.4;
-  }
-
-  // Large alert zone = high-altitude interception = wider debris
-  const area = Math.PI * ellipse.semiMajor * ellipse.semiMinor;
-  const altitudeFactor = area > 2000 ? 1.5 : area > 500 ? 1.0 : 0.6;
-
-  // Debris can reach outside alert zone
-  const proximityBoost = closestDist < DEBRIS_REACH_KM
-    ? (1 - closestDist / DEBRIS_REACH_KM) * 0.3
-    : 0;
-
-  return clamp(pAlert * baseRate * positionFactor * altitudeFactor + proximityBoost, 0, 1);
+  return clamp(pAlert * pIntercepted * pNotableDebris * pWithinRange, 0, 1);
 }
 
-function calculatePBoom(alertCoords, pImpact, pDebris) {
+function calculatePBoom(alertCoords, pAlert, closestDist, alertCat) {
+  // P(boom within 25km) — audible explosion from interception or impact
   const nearbyCount = alertCoords.filter(c => haversineKm(c, HOME_COORD) < BOOM_RADIUS_KM).length;
   const nearbyRatio = nearbyCount / Math.max(alertCoords.length, 1);
 
-  // Interceptions are very likely (~90% success rate)
-  const pInterceptionNearby = nearbyRatio * 0.9;
+  // Interception booms are very loud and common when alerts are nearby
+  const pInterceptionBoom = nearbyRatio * getInterceptionRate(alertCat);
 
-  let pBoom = 1 - (1 - pInterceptionNearby) * (1 - pImpact) * (1 - pDebris);
-  if (nearbyRatio > 0.5) pBoom = Math.max(pBoom, 0.95);
+  // Impact boom (when interception fails)
+  const pImpactBoom = nearbyRatio * (1 - getInterceptionRate(alertCat)) * 0.15;
+
+  let pBoom = 1 - (1 - pInterceptionBoom) * (1 - pImpactBoom);
+
+  // If many alerts are nearby, boom is almost certain
+  if (nearbyRatio > 0.3 && closestDist < 30) pBoom = Math.max(pBoom, 0.90);
 
   return clamp(pBoom, 0, 1);
 }
 
 // --- Combined Risk Analysis ---
 
-function analyzeRisk(alertCoords, alertRegions, alertSettlements) {
+function analyzeRisk(alertCoords, alertRegions, alertSettlements, alertCat) {
   if (alertCoords.length === 0) return null;
 
   const ellipse = fitEllipse(alertCoords);
@@ -673,18 +672,24 @@ function analyzeRisk(alertCoords, alertRegions, alertSettlements) {
   const expansion = trackExpansion(alertCoords);
   const closestDist = Math.min(...alertCoords.map(c => haversineKm(HOME_COORD, c)));
   const dir = bearing(HOME_COORD, ellipse.centroid);
+  const cat = alertCat || "1";
 
   const regions = alertRegions instanceof Set ? alertRegions : new Set(alertRegions || []);
   const settlements = alertSettlements || [];
 
-  const pAlert = calculatePAlert(regions, settlements, ellipse, homePosition, expansion);
-  const pImpact = calculatePImpact(pAlert, ellipse, homePosition);
-  const pDebris = calculatePDebris(pAlert, ellipse, homePosition, closestDist);
-  const pBoom = calculatePBoom(alertCoords, pImpact, pDebris);
+  const pAlert = calculatePAlert(regions, settlements, ellipse, homePosition, expansion, closestDist);
+  const pImpact = calculatePImpact(pAlert, closestDist, cat);
+  const pDebris = calculatePDebris(pAlert, closestDist, cat);
+  const pBoom = calculatePBoom(alertCoords, pAlert, closestDist, cat);
+
+  const threatType = cat === "6" ? "כלי טיס" : "רקטות";
+  const interceptRate = Math.round(getInterceptionRate(cat) * 100);
 
   return {
     closestDist: Math.round(closestDist),
     dir,
+    threatType,
+    interceptRate,
     ellipse: {
       azimuth: Math.round(ellipse.azimuthDeg),
       eccentricity: Math.round(ellipse.eccentricity * 100) / 100,
@@ -701,8 +706,8 @@ function analyzeRisk(alertCoords, alertRegions, alertSettlements) {
   };
 }
 
-function formatRiskMessage(alertCoords, alertRegions, alertSettlements) {
-  const risk = analyzeRisk(alertCoords, alertRegions, alertSettlements);
+function formatRiskMessage(alertCoords, alertRegions, alertSettlements, alertCat) {
+  const risk = analyzeRisk(alertCoords, alertRegions, alertSettlements, alertCat);
   if (!risk) return "";
 
   const p = risk.probabilities;
@@ -710,11 +715,13 @@ function formatRiskMessage(alertCoords, alertRegions, alertSettlements) {
 
   let expansionNote = "";
   if (risk.expansion.expandingTowardHome && risk.expansion.velocity > 0.5) {
-    expansionNote = `\n⚡ התרעות מתרחבות לכיוונך (${risk.expansion.eta} דק׳)`;
+    expansionNote = `\n⚡ מתרחב לכיוונך (${risk.expansion.eta} דק׳)`;
   }
 
+  // Compact format: threat type, distance, probabilities (all within radius)
   return (
-    `\n\n🏠 ${HOME_NAME}: ${risk.closestDist} ק״מ ${risk.dir} | ${pEmoji(p.alert)} ${p.alert}% | טיל ${p.impact}% | רסיס ${p.debris}% | בום ${p.boom}%` +
+    `\n\n🏠 ${HOME_NAME} | ${risk.closestDist} ק״מ ${risk.dir} | ${risk.threatType} (יירוט ${risk.interceptRate}%)` +
+    `\n${pEmoji(p.alert)} אזעקה ${p.alert}% | נפילה ב-5ק״מ ${p.impact}% | רסיס ב-5ק״מ ${p.debris}% | בום ב-25ק״מ ${p.boom}%` +
     expansionNote
   );
 }
@@ -1608,7 +1615,7 @@ async function fetchAlerts() {
           if (base !== area && REGION_MAP[base]) alertRegions.add(REGION_MAP[base]);
         }
       }
-      evt.riskMsg = formatRiskMessage(alertCoords, alertRegions, allAreas);
+      evt.riskMsg = formatRiskMessage(alertCoords, alertRegions, allAreas, evt.type);
 
       console.log(`\n[${time}][${mode}] ${alert.title} [${evt.phase}] ${evt.settlements.size} settlements, ${evt.waves.length} waves`);
 
