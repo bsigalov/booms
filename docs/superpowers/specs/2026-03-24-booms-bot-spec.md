@@ -295,25 +295,37 @@ A mock Oref server replays recorded real scenarios. The bot's `ALERT_URL` is tem
 
 ---
 
-## 9. Planned Improvements
+## 9. Implementation Status
 
+| # | Improvement | Status |
+|---|---|---|
+| 1 | Discussion comments as replies to channel posts | DONE — `reply_to_message_id` + `pendingThreadDetection` + `allowed_updates` in POST |
+| 2 | `ended` only by explicit Oref message (+ 20min safety timeout) | DONE |
+| 3 | `waiting` only reachable from `alert`, not `early_warning` | DONE |
+| 4 | No reopening of ended events | DONE |
+| 5 | Multi-event splitting: cumulative centroid, 50km threshold | DONE |
+| 6 | Outlier detection in geocoding (3σ + Israel bounds) | DONE |
+| 7 | Mock Oref server replacing internal simulation | DONE — `mock-oref-server.mjs` |
+| 8 | Expand settlement polygons to all settlements | DONE — 1569 polygons from tzevadom + gov shapefile + Nominatim |
+| 9 | Circle radius 500m | DONE |
+| 10 | More distinct wave colors (8 hues) | DONE |
+| 11 | Early warning with distinct orange polygon color | DONE |
+| 12 | Boom button in discussion comments | DONE |
+| 13 | Analyze Oref alert titles — cat=1 rockets, cat=6 drones, cat=10 early warning/ended | DONE |
+| 14 | Risk model rewrite — real base rates, radius-based, cat-specific interception rates | DONE |
+| 15 | Deploy pipeline — SHA tags, delete+recreate, health check | DONE |
+| 16 | Message style switcher (/style A/B/C/D) | DONE |
+| 17 | Geocoding: 1873 coords, cross-validated against Google Places | DONE |
+| 18 | Interactive map review tool (map-review.html) | DONE |
+| 19 | Skip risk analysis for drone attacks (cat=6) | DONE |
+
+### Remaining / Future
 | # | Improvement | Priority |
 |---|---|---|
-| 1 | Discussion comments as replies to channel posts — verify cross-chat reply works | Critical |
-| 2 | `ended` only by explicit Oref message (+ 20min safety timeout) | High |
-| 3 | `waiting` only reachable from `alert`, not `early_warning` | High |
-| 4 | No reopening of ended events | High |
-| 5 | Multi-event splitting: cumulative centroid, 50km threshold | High |
-| 6 | Outlier detection in geocoding | High |
-| 7 | Mock Oref server replacing internal simulation | Medium |
-| 8 | Expand settlement polygons to all settlements | Medium |
-| 9 | Circle radius 1km (currently 3km) | Medium |
-| 10 | More distinct wave colors | Medium |
-| 11 | Early warning with distinct polygon background color | Medium |
-| 12 | Boom button after every discussion comment | Medium |
-| 13 | Analyze Oref alert titles to define early warning detection | Medium |
-| 14 | Stream logs to Azure Log Analytics | Low |
-| 15 | Extract modules into separate files | Low |
+| 20 | News scraping for real impact/interception data | Medium |
+| 21 | Accumulate event outcomes for probability calibration | Medium |
+| 22 | Stream logs to Azure Log Analytics | Low |
+| 23 | Extract modules into separate files | Low |
 
 ---
 
