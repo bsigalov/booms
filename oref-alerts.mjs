@@ -1523,8 +1523,20 @@ async function fetchAlerts() {
       }
 
       // Find or create the right event for these settlements
-      // findNearestEvent already prevents test/real cross-contamination via isTest flag
-      const nearest = findNearestEvent(settlements);
+      // Special case: if there's an active early_warning event within 10 min, always merge alarm into it
+      // (EW covers the whole country, centroid distance would be >50km but it's the same attack)
+      let nearest = null;
+      const isThisEW = isEarlyWarningAlert(alert);
+      if (!isThisEW) {
+        for (const [, e] of activeEvents) {
+          if (e.phase === "early_warning" && e.isTest === simActive && (now - e.lastWaveTime < 10 * 60000)) {
+            nearest = { key: e.regionKey, event: e, dist: 0 };
+            console.log(`[alert] merging alarm into active early_warning event "${e.regionKey}"`);
+            break;
+          }
+        }
+      }
+      if (!nearest) nearest = findNearestEvent(settlements);
       let evt;
 
       if (nearest) {
