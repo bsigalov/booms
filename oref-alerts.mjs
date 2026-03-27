@@ -1449,6 +1449,7 @@ async function fetchAlerts() {
             const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
             console.log(`[lifecycle][${key}] waiting → ended (20min safety timeout)`);
             evt.phase = "ended";
+            if (!evt.isTest) updateCalibration(evt);
             evt.history.push({ time, text: "✅ האירוע הסתיים (זמן המתנה מקסימלי)" });
             await updateEventMessage(evt);
             await sendDiscussionUpdate(evt, "ended", `ניתן לצאת מהמרחב המוגן.\nסה"כ ${evt.settlements.size} ישובים, ${evt.waves.length} גלים.`);
@@ -1461,6 +1462,7 @@ async function fetchAlerts() {
           const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
           console.log(`[lifecycle][${key}] early_warning → cleanup (20min timeout, no alert followed)`);
           evt.phase = "ended";
+          if (!evt.isTest) updateCalibration(evt);
           evt.history.push({ time, text: "✅ ההתרעה הסתיימה (לא הוסלמה לאזעקה)" });
           await updateEventMessage(evt);
           await sendDiscussionUpdate(evt, "ended", `ההתרעה המוקדמת הסתיימה ללא אזעקה.`);
@@ -1513,6 +1515,7 @@ async function fetchAlerts() {
             const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
             console.log(`[lifecycle][${key}] → ended (explicit Oref end event)`);
             evt.phase = "ended";
+            if (!evt.isTest) updateCalibration(evt);
             evt.history.push({ time, text: "✅ האירוע הסתיים (פיקוד העורף)" });
             await updateEventMessage(evt);
             await sendDiscussionUpdate(evt, "ended", `פיקוד העורף הודיע: האירוע הסתיים.\nסה"כ ${evt.settlements.size} ישובים, ${evt.waves.length} גלים.`);
@@ -2232,6 +2235,33 @@ function backfillAlertHistory() {
 
   writeFileSync(ALERT_HISTORY_PATH, JSON.stringify({ events }, null, 2));
   console.log(`Backfill: ${events.length} אירועים, ${events.filter(e => e.includesHome).length} כוללים ${HOME_NAME}`);
+}
+
+// Risk model calibration from news reports
+function updateCalibration(evt) {
+  if (!evt.newsReports || evt.newsReports.length === 0) return;
+  let calibration = {};
+  try { calibration = JSON.parse(readFileSync(`${DATA_DIR}/calibration.json`, "utf8")); } catch {}
+
+  const origin = evt.origin || "unknown";
+  if (!calibration[origin]) {
+    calibration[origin] = { events: 0, interceptions: 0, impacts: 0, debrisReports: 0, missileTypes: {} };
+  }
+  const cal = calibration[origin];
+  cal.events++;
+
+  for (const report of evt.newsReports) {
+    if (report.category === "interception") cal.interceptions += report.count;
+    if (report.category === "impact") cal.impacts += report.count;
+    if (report.category === "debris") cal.debrisReports += report.count;
+    if (report.missileType) cal.missileTypes[report.missileType] = (cal.missileTypes[report.missileType] || 0) + 1;
+  }
+
+  const total = cal.interceptions + cal.impacts;
+  if (total > 0) cal.computedInterceptionRate = cal.interceptions / total;
+
+  try { writeFileSync(`${DATA_DIR}/calibration.json`, JSON.stringify(calibration, null, 2)); } catch {}
+  console.log(`[calibration] ${origin}: ${cal.events} events, rate=${((cal.computedInterceptionRate || 0) * 100).toFixed(0)}%`);
 }
 
 // Multi-channel news scraper
