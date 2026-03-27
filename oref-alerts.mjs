@@ -2234,17 +2234,107 @@ function backfillAlertHistory() {
   console.log(`Backfill: ${events.length} אירועים, ${events.filter(e => e.includesHome).length} כוללים ${HOME_NAME}`);
 }
 
-// Scrape impact reports from news channel
-const IMPACT_KEYWORDS = {
-  impact: ["נפילה", "נפל טיל", "פגיעה ישירה", "רקטה נפלה"],
-  debris: ["רסיס", "רסיסים", "שברי", "שברים", "רסיסי יירוט"],
-  interception: ["יירוט", "יורט", "מיירט"],
-};
-let lastScrapedMsgId = 0;
+// Multi-channel news scraper
+const NEWS_CHANNELS = [
+  { username: "aharonyediotnews", label: "אהרון חדשות" },
+  { username: "lelotsenzura", label: "ללא צנזורה" },
+  { username: "yediotnews25", label: "ידיעות 25" },
+];
 
-async function scrapeImpactChannel() {
+const REPORT_KEYWORDS = {
+  impact: ["נפילה", "נפל טיל", "פגיעה ישירה", "רקטה נפלה", "פגיעה", "נחת"],
+  interception: ["יירוט", "יורט", "מיירט", "יירוטים"],
+  debris: ["רסיס", "רסיסים", "שברי", "שברים", "רסיסי יירוט"],
+  casualty: ["פצועים", "נפגעים", "הרוגים", "נהרג", "פצוע"],
+  damage: ["נזק", "פגיעה במבנה", "פגיעה ברכב", "שריפה", "הרס"],
+};
+
+const MISSILE_TYPES = {
+  ballistic: ["טיל בליסטי", "טיל באליסטי", "בליסטי"],
+  cruise: ["טיל שיוט", "טיל מעופף", "שיוט"],
+  rocket: ["רקטה", "רקטות", "ירי רקטות"],
+  drone: ["מל\"ט", "כטב\"מ", "רחפן", "מזל\"ט", "כלי טיס"],
+  mirv: ["טיל מתפצל", "ראשי נפץ"],
+};
+
+let scraperState = {};
+try { scraperState = JSON.parse(readFileSync(`${DATA_DIR}/scraper-state.json`, "utf8")); } catch {}
+function saveScraperState() {
+  try { writeFileSync(`${DATA_DIR}/scraper-state.json`, JSON.stringify(scraperState, null, 2)); } catch {}
+}
+
+function classifyReport(text, channel, msgId) {
+  let category = null;
+  for (const [cat, keywords] of Object.entries(REPORT_KEYWORDS)) {
+    if (keywords.some(kw => text.includes(kw))) { category = cat; break; }
+  }
+  if (!category) return null;
+
+  let missileType = null;
+  for (const [type, keywords] of Object.entries(MISSILE_TYPES)) {
+    if (keywords.some(kw => text.includes(kw))) { missileType = type; break; }
+  }
+
+  let location = null, locationCoord = null;
+  const sortedCities = Object.keys(CITY_COORDS).sort((a, b) => b.length - a.length);
+  for (const city of sortedCities) {
+    if (city.length >= 3 && text.includes(city)) {
+      location = city;
+      locationCoord = CITY_COORDS[city];
+      break;
+    }
+  }
+
+  let count = 1;
+  const countMatch = text.match(/(\d+)\s*(?:יירוט|נפילות|פצועים|רקטות|טילים)/);
+  if (countMatch) count = parseInt(countMatch[1]);
+
+  const distToHome = locationCoord ? Math.round(haversineKm(HOME_COORD, locationCoord)) : null;
+
+  return {
+    channel, msgId,
+    timestamp: new Date().toISOString(),
+    text: text.substring(0, 300),
+    category, missileType,
+    location, locationCoord, distToHome, count,
+    relatedEventId: null,
+  };
+}
+
+function correlateReport(report) {
+  const reportTime = Date.now();
+  for (const [key, evt] of activeEvents) {
+    const timeDiff = Math.abs(reportTime - evt.startTime);
+    if (timeDiff > 30 * 60000) continue;
+    if (report.locationCoord) {
+      const evtCoords = [...evt.settlements].map(s => CITY_COORDS[s]).filter(Boolean);
+      if (evtCoords.length === 0) continue;
+      const cx = evtCoords.reduce((s, c) => s + c[0], 0) / evtCoords.length;
+      const cy = evtCoords.reduce((s, c) => s + c[1], 0) / evtCoords.length;
+      if (haversineKm(report.locationCoord, [cx, cy]) < 50) {
+        report.relatedEventId = key;
+        if (!evt.newsReports) evt.newsReports = [];
+        evt.newsReports.push(report);
+        console.log(`[scraper] matched "${report.category}" to event "${key}"`);
+        return;
+      }
+    }
+  }
+}
+
+function saveReports(newReports) {
+  for (const r of newReports) correlateReport(r);
+  let existing = [];
+  try { existing = JSON.parse(readFileSync(`${DATA_DIR}/news-reports.json`, "utf8")); } catch {}
+  existing.push(...newReports);
+  if (existing.length > 1000) existing = existing.slice(-1000);
+  try { writeFileSync(`${DATA_DIR}/news-reports.json`, JSON.stringify(existing, null, 2)); } catch {}
+}
+
+async function scrapeChannel(channel) {
   try {
-    const url = "https://t.me/s/aharonyediotoriginal";
+    const state = scraperState[channel.username] || { lastMsgId: 0 };
+    const url = `https://t.me/s/${channel.username}`;
     const res = await fetch(url, {
       headers: { "User-Agent": "Mozilla/5.0 (compatible; OrefBot/1.0)" },
       signal: AbortSignal.timeout(10000),
@@ -2256,38 +2346,25 @@ async function scrapeImpactChannel() {
     let m;
     while ((m = msgPattern.exec(html)) !== null) {
       const msgId = parseInt(m[1]);
-      if (msgId <= lastScrapedMsgId) continue;
-
+      if (msgId <= state.lastMsgId) continue;
       const text = m[2].replace(/<[^>]+>/g, "").trim();
       if (!text) continue;
-
-      let type = null;
-      for (const [t, keywords] of Object.entries(IMPACT_KEYWORDS)) {
-        if (keywords.some(kw => text.includes(kw))) { type = t; break; }
-      }
-      if (!type) continue;
-
-      let location = null, locationCoord = null;
-      const sortedCities = Object.entries(CITY_COORDS).sort((a, b) => b[0].length - a[0].length);
-      for (const [city, coord] of sortedCities) {
-        if (text.includes(city)) { location = city; locationCoord = coord; break; }
-      }
-
-      const distToHome = locationCoord ? Math.round(haversineKm(HOME_COORD, locationCoord)) : null;
-      reports.push({ msgId, text: text.substring(0, 200), type, location, distToHome });
-      if (msgId > lastScrapedMsgId) lastScrapedMsgId = msgId;
+      const report = classifyReport(text, channel.username, msgId);
+      if (report) reports.push(report);
+      if (msgId > state.lastMsgId) state.lastMsgId = msgId;
     }
 
+    scraperState[channel.username] = state;
     if (reports.length > 0) {
-      let existing = { reports: [] };
-      try { existing = JSON.parse(readFileSync(IMPACT_HISTORY_PATH, "utf8")); } catch {}
-      existing.reports.push(...reports);
-      if (existing.reports.length > 500) existing.reports = existing.reports.slice(-500);
-      writeFileSync(IMPACT_HISTORY_PATH, JSON.stringify(existing, null, 2));
-      console.log(`[סריקה] ${reports.length} דיווחי נפילה חדשים`);
+      saveReports(reports);
+      saveScraperState();
+      console.log(`[scraper] ${channel.label}: ${reports.length} new reports`);
     }
-  } catch {}
+  } catch (e) {
+    console.warn(`[scraper] ${channel.label}: ${e.message}`);
+  }
 }
+
 
 // Build correlation index from historical data
 function buildCorrelationIndex() {
@@ -2350,9 +2427,13 @@ function buildCorrelationIndex() {
 backfillAlertHistory();
 buildCorrelationIndex();
 
-// Scrape impact channel every 60 seconds
-setInterval(scrapeImpactChannel, 60000);
-scrapeImpactChannel();
+// Scrape news channels every 60 seconds, staggered by 20s
+NEWS_CHANNELS.forEach((ch, i) => {
+  setTimeout(() => {
+    scrapeChannel(ch);
+    setInterval(() => scrapeChannel(ch), 60000);
+  }, i * 20000);
+});
 
 // Rebuild correlation index every hour
 setInterval(buildCorrelationIndex, 3600000);
