@@ -74,6 +74,8 @@ function createEvent(regionKey, title, cat, settlements, time, protectionMin, al
     predictionConfidence: null,
     predictionBasedOn: null,
     launchAzimuth: null,
+    estimatedImpact: null,
+    interception: null,
     lastWaveTime: Date.now(),
     lastTextMessageId: null,
     lastMapMessageId: null,
@@ -800,6 +802,95 @@ function predictAlarmTiming(evt) {
     basedOn: match.eventCount,
     clusterId: match.clusterId,
   };
+}
+
+function nearestSettlement(coord) {
+  let best = null, bestDist = Infinity;
+  for (const [name, c] of Object.entries(CITY_COORDS)) {
+    const d = haversineKm(coord, c);
+    if (d < bestDist) { bestDist = d; best = name; }
+  }
+  return best;
+}
+
+function estimateImpactPoint(evt) {
+  if (evt.waves.length === 0) return null;
+  const latestWave = evt.waves[evt.waves.length - 1];
+  const ellipse = latestWave.ellipse;
+  if (!ellipse || !ellipse.K_LNG || !ellipse.K_LAT) return null;
+
+  // Direction: use expansion vector if available, otherwise ellipse major axis
+  let dirRad;
+  if (evt.expansionVector && evt.expansionVector.magnitude > 0.5) {
+    const { origin, target } = evt.expansionVector;
+    dirRad = Math.atan2(
+      (target[1] - origin[1]) * ellipse.K_LAT,
+      (target[0] - origin[0]) * ellipse.K_LNG
+    );
+  } else {
+    dirRad = ellipse.azimuthRad;
+  }
+
+  // Impact at leading edge of ellipse (0.5 × semiMajor beyond centroid)
+  const projectionFactor = 0.5;
+  const dxKm = ellipse.semiMajor * projectionFactor * Math.cos(dirRad);
+  const dyKm = ellipse.semiMajor * projectionFactor * Math.sin(dirRad);
+  const impactLng = ellipse.centroid[0] + dxKm / ellipse.K_LNG;
+  const impactLat = ellipse.centroid[1] + dyKm / ellipse.K_LAT;
+  const point = [impactLng, impactLat];
+
+  // Confidence based on eccentricity
+  let confidence, uncertaintyKm;
+  if (ellipse.eccentricity > 0.7) {
+    confidence = "high";
+    uncertaintyKm = ellipse.semiMinor;
+  } else if (ellipse.eccentricity > 0.5) {
+    confidence = "medium";
+    uncertaintyKm = ellipse.semiMinor * 2;
+  } else {
+    confidence = "low";
+    uncertaintyKm = ellipse.semiMajor;
+  }
+
+  const label = nearestSettlement(point);
+
+  return { point, uncertaintyKm, confidence, label };
+}
+
+function detectInterception(evt) {
+  if (evt.waves.length < 2) return null;
+
+  for (let i = 1; i < evt.waves.length; i++) {
+    const prev = evt.waves[i - 1];
+    const curr = evt.waves[i];
+    if (!prev.ellipse || !curr.ellipse) continue;
+
+    const prevArea = prev.ellipse.semiMajor * prev.ellipse.semiMinor * Math.PI;
+    const currArea = curr.ellipse.semiMajor * curr.ellipse.semiMinor * Math.PI;
+    const areaRatio = currArea / Math.max(0.01, prevArea);
+    const eccRatio = curr.ellipse.eccentricity / Math.max(0.01, prev.ellipse.eccentricity);
+
+    // Interception: area > 2x AND eccentricity dropped to < 70% of previous
+    if (areaRatio > 2.0 && eccRatio < 0.7) {
+      // Interception point: 70% of the way between wave centroids
+      const pC = prev.ellipse.centroid;
+      const cC = curr.ellipse.centroid;
+      const point = [
+        pC[0] + 0.7 * (cC[0] - pC[0]),
+        pC[1] + 0.7 * (cC[1] - pC[1]),
+      ];
+      const debrisRadiusKm = curr.ellipse.semiMajor;
+
+      return {
+        detected: true,
+        point,
+        debrisRadiusKm,
+        detectedAtWave: i,
+        label: nearestSettlement(point),
+      };
+    }
+  }
+  return null;
 }
 
 // --- Position-in-Ellipse Classification ---
@@ -2179,6 +2270,18 @@ async function fetchAlerts() {
             evt.predictionConfidence = prediction.confidenceMinutes;
             evt.predictionBasedOn = prediction.basedOn;
           }
+        }
+      }
+
+      // Impact estimation + interception detection
+      if (evt.waves.length >= 1 && evt.phase === "alert") {
+        evt.estimatedImpact = estimateImpactPoint(evt);
+        evt.interception = detectInterception(evt);
+        if (evt.interception?.detected) {
+          console.log(`[impact] Interception detected at wave ${evt.interception.detectedAtWave} near ${evt.interception.label}, debris ${evt.interception.debrisRadiusKm.toFixed(1)}km`);
+        }
+        if (evt.estimatedImpact) {
+          console.log(`[impact] Estimated impact near ${evt.estimatedImpact.label} (${evt.estimatedImpact.confidence}, ±${evt.estimatedImpact.uncertaintyKm.toFixed(1)}km)`);
         }
       }
 
