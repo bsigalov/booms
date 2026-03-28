@@ -1022,7 +1022,7 @@ function analyzeRisk(alertCoords, alertRegions, alertSettlements, alertCat, orig
   };
 }
 
-function formatRiskMessage(alertCoords, alertRegions, alertSettlements, alertCat, origin, isDirect = false) {
+function formatRiskMessage(alertCoords, alertRegions, alertSettlements, alertCat, origin, isDirect = false, prediction = null) {
   // Skip risk analysis for drone attacks (cat=6) — not relevant
   if (String(alertCat) === "6") return "";
   const risk = analyzeRisk(alertCoords, alertRegions, alertSettlements, alertCat, origin);
@@ -1038,12 +1038,21 @@ function formatRiskMessage(alertCoords, alertRegions, alertSettlements, alertCat
 
   const directNote = isDirect ? "\n⚡ ירי ישיר (ללא התרעה מוקדמת)" : "";
 
+  const originLabels = { iran: "ירי מאיראן", lebanon: "ירי מלבנון", gaza: "ירי מעזה" };
+  const originLabel = originLabels[origin] || "";
+  let predictionNote = "";
+  if (prediction?.predictedTime) {
+    const timeStr = prediction.predictedTime.toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem", hour: "2-digit", minute: "2-digit" });
+    predictionNote = `\nצפי לאזעקה ב-${timeStr} (±${prediction.confidenceMinutes} דק׳, מבוסס על ${prediction.basedOn} אירועים)`;
+  }
+
   // Compact format: threat type, distance, probabilities (all within radius)
   return (
-    `\n\n🏠 ${HOME_NAME} | ${risk.closestDist} ק״מ ${risk.dir} | ${risk.threatType} (יירוט ${risk.interceptRate}%)` +
+    `\n\n🏠 ${HOME_NAME} | ${risk.closestDist} ק״מ ${risk.dir}${originLabel ? ` | ${originLabel}` : ""} | ${risk.threatType} (יירוט ${risk.interceptRate}%)` +
     `\n${pEmoji(p.alert)} אזעקה ${p.alert}% | נפילה ב-5ק״מ ${p.impact}% | רסיס ב-5ק״מ ${p.debris}% | בום ב-25ק״מ ${p.boom}%` +
     expansionNote +
-    directNote
+    directNote +
+    predictionNote
   );
 }
 
@@ -2150,7 +2159,8 @@ async function fetchAlerts() {
           if (base !== area && REGION_MAP[base]) alertRegions.add(REGION_MAP[base]);
         }
       }
-      evt.riskMsg = formatRiskMessage(alertCoords, alertRegions, allAreas, evt.type, evt.origin, evt.isDirect);
+      const prediction = evt.predictedAlarmTime ? { predictedTime: evt.predictedAlarmTime, confidenceMinutes: evt.predictionConfidence, basedOn: evt.predictionBasedOn } : null;
+      evt.riskMsg = formatRiskMessage(alertCoords, alertRegions, allAreas, evt.type, evt.origin, evt.isDirect, prediction);
 
       // Pattern-based EW probability + Iran timing prediction
       if (evt.phase === "early_warning" && evt.ewEllipse) {
