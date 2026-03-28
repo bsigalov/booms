@@ -714,6 +714,42 @@ function updatePatternClusters(features) {
   return bestCluster?.clusterId || clusters[clusters.length - 1].clusterId;
 }
 
+function findMatchingPattern(evt) {
+  if (!evt.ewEllipse) return null;
+  const PATTERNS_PATH = `${DATA_DIR}/ew-alarm-patterns.json`;
+  let clusters = [];
+  try { clusters = JSON.parse(readFileSync(PATTERNS_PATH, "utf8")); } catch { return null; }
+  if (clusters.length === 0) return null;
+
+  const ewFeatures = {
+    ewAreaKm2: evt.ewAreaKm2,
+    ewEccentricity: evt.ewEllipse.eccentricity,
+    ewAxisRatio: evt.ewEllipse.semiMajor / Math.max(0.1, evt.ewEllipse.semiMinor),
+    ewAzimuth: evt.ewEllipse.azimuthDeg,
+  };
+
+  let bestCluster = null, bestDist = Infinity;
+  for (const c of clusters) {
+    if (c.eventCount < 3) continue;
+    const d = patternDistance(ewFeatures, {
+      ewAreaKm2: c.avg_ewAreaKm2,
+      ewEccentricity: c.avg_ewEccentricity,
+      ewAzimuth: c.avg_ewAzimuth,
+    });
+    if (d < bestDist) { bestDist = d; bestCluster = c; }
+  }
+
+  if (bestCluster && bestDist < 0.8) {
+    return {
+      clusterId: bestCluster.clusterId,
+      pAlarmAtHome: bestCluster.pAlarmAtHome,
+      eventCount: bestCluster.eventCount,
+      distance: bestDist,
+    };
+  }
+  return null;
+}
+
 // --- Position-in-Ellipse Classification ---
 
 function classifyHomePosition(ellipse, homeCoord) {
@@ -2058,6 +2094,16 @@ async function fetchAlerts() {
         }
       }
       evt.riskMsg = formatRiskMessage(alertCoords, alertRegions, allAreas, evt.type, evt.origin, evt.isDirect);
+
+      // Pattern-based EW probability
+      if (evt.phase === "early_warning" && evt.ewEllipse) {
+        const match = findMatchingPattern(evt);
+        if (match) {
+          const pct = Math.round(match.pAlarmAtHome * 100);
+          evt.riskMsg += `\n📊 לפי ${match.eventCount} אירועים דומים: ${pct}% סיכוי לאזעקה באזורך`;
+          evt.patternClusterId = match.clusterId;
+        }
+      }
 
       console.log(`\n[${time}][${mode}] ${alert.title} [${evt.phase}] ${evt.settlements.size} settlements, ${evt.waves.length} waves`);
 
