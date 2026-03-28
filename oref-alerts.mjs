@@ -69,6 +69,11 @@ function createEvent(regionKey, title, cat, settlements, time, protectionMin, al
     isDirect: false,
     ewToAlarmSeconds: null,
     patternClusterId: null,
+    origin: null,
+    predictedAlarmTime: null,
+    predictionConfidence: null,
+    predictionBasedOn: null,
+    launchAzimuth: null,
     lastWaveTime: Date.now(),
     lastTextMessageId: null,
     lastMapMessageId: null,
@@ -346,6 +351,28 @@ const REGION_ADJACENCY = {};
   }
   const totalPairs = Object.values(REGION_ADJACENCY).reduce((s, v) => s + v.size, 0) / 2;
   console.log(`[adjacency] ${totalPairs} adjacent region pairs from ${regionNames.length} regions`);
+}
+
+const GAZA_REGIONS = new Set(["עוטף עזה", "מערב הנגב", "שדות נגב", "שער הנגב", "אשקלון"]);
+
+function classifyOrigin(evt) {
+  // Iran: massive EW with 100+ settlements
+  if (evt.ewSettlements.size >= 100) return "iran";
+  // Gaza: direct fire in southern regions
+  if (evt.isDirect) {
+    const regions = new Set();
+    for (const s of evt.settlements) {
+      const r = REGION_MAP[s] || REGION_MAP[s.split(" - ")[0].trim()];
+      if (r) regions.add(r);
+    }
+    for (const r of regions) {
+      if (GAZA_REGIONS.has(r)) return "gaza";
+    }
+    return "lebanon";
+  }
+  // EW present but < 100 settlements
+  if (evt.ewSettlements.size > 0) return "iran";
+  return "unknown";
 }
 
 function summarizeAreas(areas) {
@@ -1986,6 +2013,11 @@ async function fetchAlerts() {
           }
         }
 
+        // Classify attack origin
+        evt.origin = classifyOrigin(evt);
+        if (evt.ewEllipse) evt.launchAzimuth = evt.ewEllipse.azimuthDeg;
+        if (evt.origin !== "unknown") console.log(`[lifecycle][${evt.regionKey}] origin=${evt.origin}${evt.launchAzimuth ? ` azimuth=${evt.launchAzimuth.toFixed(0)}°` : ""}`);
+
         await updateEventMessage(evt);
         await sendDiscussionUpdate(evt, "new", `${isEW ? "התרעה מוקדמת" : "אזעקה"} באזורים: ${summarizeAreas(settlements)}`, alert);
 
@@ -2006,6 +2038,8 @@ async function fetchAlerts() {
         console.log(`[lifecycle][${evt.regionKey}] early_warning → alert (real siren)`);
         evt.phase = "alert";
         evt.ewToAlarmSeconds = Math.round((Date.now() - evt.startTime) / 1000);
+        evt.origin = classifyOrigin(evt);
+        if (evt.ewEllipse) evt.launchAzimuth = evt.ewEllipse.azimuthDeg;
       }
       if (evt.phase === "waiting") {
         console.log(`[lifecycle][${evt.regionKey}] waiting → alert (resumed)`);
