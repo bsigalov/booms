@@ -57,7 +57,14 @@ function createEvent(regionKey, title, cat, settlements, time, protectionMin, al
     type: cat,
     settlements: new Set(settlements),
     currentWaveSettlements: new Set(settlements),
-    waves: earlyWarn ? [] : [{ settlements: new Set(settlements), time }],
+    waves: earlyWarn ? [] : [(() => {
+      const w = { settlements: new Set(settlements), time };
+      const { ellipse, hull, useHull } = computeWaveEllipse(settlements);
+      w.ellipse = ellipse;
+      w.hull = hull;
+      w.useHull = useHull;
+      return w;
+    })()],
     history: [{ time, text: `${emoji} ${label}: ${summarizeAreas(settlements)} (${settlements.length})` }],
     protectionMin: protectionMin,
     riskMsg: "",
@@ -538,6 +545,20 @@ function convexHull(coords) {
   }
   hull.push(hull[0]); // close polygon
   return hull;
+}
+
+function computeWaveEllipse(waveSettlements) {
+  const coords = [];
+  for (const s of waveSettlements) {
+    const c = fuzzyMatch(s) || CITY_COORDS[s];
+    if (c) coords.push(c);
+  }
+  if (coords.length === 0) return { ellipse: null, hull: null, useHull: false };
+
+  const ellipse = fitEllipse(coords);
+  const useHull = ellipse.eccentricity < 0.5;
+  const hull = useHull ? convexHull(coords) : null;
+  return { ellipse, hull, useHull };
 }
 
 // --- Position-in-Ellipse Classification ---
@@ -1650,7 +1671,8 @@ async function fetchAlerts() {
       }
 
       const waveSettlements = new Set(settlements);
-      evt.waves.push({ settlements: waveSettlements, time });
+      const { ellipse: waveEllipse, hull: waveHull, useHull: waveUseHull } = computeWaveEllipse(settlements);
+      evt.waves.push({ settlements: waveSettlements, time, ellipse: waveEllipse, hull: waveHull, useHull: waveUseHull });
 
       const newSettlements = settlements.filter(s => !evt.settlements.has(s));
       for (const s of settlements) {
@@ -1658,6 +1680,32 @@ async function fetchAlerts() {
         evt.currentWaveSettlements.add(s);
       }
       evt.lastWaveTime = Date.now();
+
+      // Compute expansion vector (first wave centroid → latest wave centroid)
+      if (evt.waves.length >= 2) {
+        const firstEllipse = evt.waves[0].ellipse;
+        const lastEllipse = evt.waves[evt.waves.length - 1].ellipse;
+        if (firstEllipse?.centroid && lastEllipse?.centroid) {
+          const origin = firstEllipse.centroid;
+          const target = lastEllipse.centroid;
+          const magnitude = haversineKm(origin, target);
+          const direction = bearing(origin, target);
+          const K = 100;
+          const expVec = [(target[0] - origin[0]) * K, (target[1] - origin[1]) * K];
+          const homeVec = [(HOME_COORD[0] - origin[0]) * K, (HOME_COORD[1] - origin[1]) * K];
+          const dot = expVec[0] * homeVec[0] + expVec[1] * homeVec[1];
+          const expLen = Math.sqrt(expVec[0] ** 2 + expVec[1] ** 2);
+          const homeLen = Math.sqrt(homeVec[0] ** 2 + homeVec[1] ** 2);
+          const cosSim = (expLen > 0 && homeLen > 0) ? dot / (expLen * homeLen) : 0;
+          evt.expansionVector = {
+            origin, target, magnitude,
+            direction,
+            towardHome: cosSim > 0.7,
+          };
+        }
+      } else {
+        evt.expansionVector = null;
+      }
 
       const newProt = parseProtectionMinutes(alert.desc);
       if (newProt > evt.protectionMin) evt.protectionMin = newProt;
