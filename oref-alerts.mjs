@@ -838,7 +838,7 @@ function analyzeRisk(alertCoords, alertRegions, alertSettlements, alertCat, orig
   };
 }
 
-function formatRiskMessage(alertCoords, alertRegions, alertSettlements, alertCat, origin) {
+function formatRiskMessage(alertCoords, alertRegions, alertSettlements, alertCat, origin, isDirect = false) {
   // Skip risk analysis for drone attacks (cat=6) — not relevant
   if (String(alertCat) === "6") return "";
   const risk = analyzeRisk(alertCoords, alertRegions, alertSettlements, alertCat, origin);
@@ -852,11 +852,14 @@ function formatRiskMessage(alertCoords, alertRegions, alertSettlements, alertCat
     expansionNote = `\n⚡ מתרחב לכיוונך (${risk.expansion.eta} דק׳)`;
   }
 
+  const directNote = isDirect ? "\n⚡ ירי ישיר (ללא התרעה מוקדמת)" : "";
+
   // Compact format: threat type, distance, probabilities (all within radius)
   return (
     `\n\n🏠 ${HOME_NAME} | ${risk.closestDist} ק״מ ${risk.dir} | ${risk.threatType} (יירוט ${risk.interceptRate}%)` +
     `\n${pEmoji(p.alert)} אזעקה ${p.alert}% | נפילה ב-5ק״מ ${p.impact}% | רסיס ב-5ק״מ ${p.debris}% | בום ב-25ק״מ ${p.boom}%` +
-    expansionNote
+    expansionNote +
+    directNote
   );
 }
 
@@ -1950,7 +1953,7 @@ async function fetchAlerts() {
           if (base !== area && REGION_MAP[base]) alertRegions.add(REGION_MAP[base]);
         }
       }
-      evt.riskMsg = formatRiskMessage(alertCoords, alertRegions, allAreas, evt.type, evt.origin);
+      evt.riskMsg = formatRiskMessage(alertCoords, alertRegions, allAreas, evt.type, evt.origin, evt.isDirect);
 
       console.log(`\n[${time}][${mode}] ${alert.title} [${evt.phase}] ${evt.settlements.size} settlements, ${evt.waves.length} waves`);
 
