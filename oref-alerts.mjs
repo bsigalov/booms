@@ -580,17 +580,35 @@ function trackExpansion(currentCoords) {
 
 function clamp(v, min, max) { return Math.min(max, Math.max(min, v)); }
 
-// Interception rates by alert category
-const INTERCEPTION_RATE = {
+// Interception rates — defaults, overridden by calibration data from news scraping
+const DEFAULT_INTERCEPTION_RATE = {
   "1": 0.85,  // cat=1 rockets/missiles → Iron Dome ~85%
   "6": 0.60,  // cat=6 drones/UAVs → lower interception rate
 };
-const DEBRIS_REACH_KM = 10;     // interception debris can fall within 10km
-const IMPACT_RADIUS_KM = 5;     // "impact within 5km"
-const BOOM_RADIUS_KM = 25;      // "audible boom within 25km"
+const DEBRIS_REACH_KM = 10;
+const IMPACT_RADIUS_KM = 5;
+const BOOM_RADIUS_KM = 25;
 
-function getInterceptionRate(alertCat) {
-  return INTERCEPTION_RATE[String(alertCat)] || 0.80;
+// Load calibration data from news scraping (updated after each event)
+let calibrationData = {};
+try { calibrationData = JSON.parse(readFileSync(`${DATA_DIR}/calibration.json`, "utf8")); } catch {}
+
+function getInterceptionRate(alertCat, origin) {
+  // Use calibrated rate if we have enough data (20+ total observations)
+  if (origin && calibrationData[origin]) {
+    const cal = calibrationData[origin];
+    const total = (cal.interceptions || 0) + (cal.impacts || 0);
+    if (total >= 20 && cal.computedInterceptionRate !== undefined) {
+      console.log(`[risk] using calibrated rate for ${origin}: ${(cal.computedInterceptionRate * 100).toFixed(0)}% (n=${total})`);
+      return cal.computedInterceptionRate;
+    }
+  }
+  return DEFAULT_INTERCEPTION_RATE[String(alertCat)] || 0.80;
+}
+
+// Reload calibration after each event ends
+function reloadCalibration() {
+  try { calibrationData = JSON.parse(readFileSync(`${DATA_DIR}/calibration.json`, "utf8")); } catch {}
 }
 
 function calculatePAlert(alertRegions, alertSettlements, ellipse, homePosition, expansion, closestDist) {
@@ -621,10 +639,9 @@ function calculatePAlert(alertRegions, alertSettlements, ellipse, homePosition, 
   return clamp(pDistance + expansionBoost + sizeBoost, 0, 1);
 }
 
-function calculatePImpact(pAlert, closestDist, alertCat) {
-  // P(impact within 5km) = P(alarm) × P(not intercepted) × P(hits populated area) × P(within 5km | populated)
-  const pNotIntercepted = 1 - getInterceptionRate(alertCat);
-  const pHitsPopulated = 0.15;  // ~15% of unintercepted projectiles hit populated areas
+function calculatePImpact(pAlert, closestDist, alertCat, origin) {
+  const pNotIntercepted = 1 - getInterceptionRate(alertCat, origin);
+  const pHitsPopulated = 0.15;
   const pWithin5km = closestDist < 5 ? 0.30 :
                      closestDist < 15 ? 0.15 :
                      closestDist < 30 ? 0.08 : 0.03;
@@ -632,10 +649,9 @@ function calculatePImpact(pAlert, closestDist, alertCat) {
   return clamp(pAlert * pNotIntercepted * pHitsPopulated * pWithin5km, 0, 1);
 }
 
-function calculatePDebris(pAlert, closestDist, alertCat) {
-  // P(debris within 5km) = P(alarm) × P(intercepted) × P(notable debris) × P(within range)
-  const pIntercepted = getInterceptionRate(alertCat);
-  const pNotableDebris = 0.30;  // ~30% of interceptions produce debris that reaches ground
+function calculatePDebris(pAlert, closestDist, alertCat, origin) {
+  const pIntercepted = getInterceptionRate(alertCat, origin);
+  const pNotableDebris = 0.30;
   const pWithinRange = closestDist < DEBRIS_REACH_KM
     ? 0.25 * (1 - closestDist / DEBRIS_REACH_KM)
     : closestDist < 20 ? 0.05 : 0.01;
@@ -643,20 +659,14 @@ function calculatePDebris(pAlert, closestDist, alertCat) {
   return clamp(pAlert * pIntercepted * pNotableDebris * pWithinRange, 0, 1);
 }
 
-function calculatePBoom(alertCoords, pAlert, closestDist, alertCat) {
-  // P(boom within 25km) — audible explosion from interception or impact
+function calculatePBoom(alertCoords, pAlert, closestDist, alertCat, origin) {
   const nearbyCount = alertCoords.filter(c => haversineKm(c, HOME_COORD) < BOOM_RADIUS_KM).length;
   const nearbyRatio = nearbyCount / Math.max(alertCoords.length, 1);
 
-  // Interception booms are very loud and common when alerts are nearby
-  const pInterceptionBoom = nearbyRatio * getInterceptionRate(alertCat);
-
-  // Impact boom (when interception fails)
-  const pImpactBoom = nearbyRatio * (1 - getInterceptionRate(alertCat)) * 0.15;
+  const pInterceptionBoom = nearbyRatio * getInterceptionRate(alertCat, origin);
+  const pImpactBoom = nearbyRatio * (1 - getInterceptionRate(alertCat, origin)) * 0.15;
 
   let pBoom = 1 - (1 - pInterceptionBoom) * (1 - pImpactBoom);
-
-  // If many alerts are nearby, boom is almost certain
   if (nearbyRatio > 0.3 && closestDist < 30) pBoom = Math.max(pBoom, 0.90);
 
   return clamp(pBoom, 0, 1);
@@ -664,7 +674,7 @@ function calculatePBoom(alertCoords, pAlert, closestDist, alertCat) {
 
 // --- Combined Risk Analysis ---
 
-function analyzeRisk(alertCoords, alertRegions, alertSettlements, alertCat) {
+function analyzeRisk(alertCoords, alertRegions, alertSettlements, alertCat, origin) {
   if (alertCoords.length === 0) return null;
 
   const ellipse = fitEllipse(alertCoords);
@@ -678,12 +688,12 @@ function analyzeRisk(alertCoords, alertRegions, alertSettlements, alertCat) {
   const settlements = alertSettlements || [];
 
   const pAlert = calculatePAlert(regions, settlements, ellipse, homePosition, expansion, closestDist);
-  const pImpact = calculatePImpact(pAlert, closestDist, cat);
-  const pDebris = calculatePDebris(pAlert, closestDist, cat);
-  const pBoom = calculatePBoom(alertCoords, pAlert, closestDist, cat);
+  const pImpact = calculatePImpact(pAlert, closestDist, cat, origin);
+  const pDebris = calculatePDebris(pAlert, closestDist, cat, origin);
+  const pBoom = calculatePBoom(alertCoords, pAlert, closestDist, cat, origin);
 
   const threatType = cat === "6" ? "כלי טיס" : "רקטות";
-  const interceptRate = Math.round(getInterceptionRate(cat) * 100);
+  const interceptRate = Math.round(getInterceptionRate(cat, origin) * 100);
 
   return {
     closestDist: Math.round(closestDist),
@@ -706,10 +716,10 @@ function analyzeRisk(alertCoords, alertRegions, alertSettlements, alertCat) {
   };
 }
 
-function formatRiskMessage(alertCoords, alertRegions, alertSettlements, alertCat) {
+function formatRiskMessage(alertCoords, alertRegions, alertSettlements, alertCat, origin) {
   // Skip risk analysis for drone attacks (cat=6) — not relevant
   if (String(alertCat) === "6") return "";
-  const risk = analyzeRisk(alertCoords, alertRegions, alertSettlements, alertCat);
+  const risk = analyzeRisk(alertCoords, alertRegions, alertSettlements, alertCat, origin);
   if (!risk) return "";
 
   const p = risk.probabilities;
@@ -1449,7 +1459,7 @@ async function fetchAlerts() {
             const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
             console.log(`[lifecycle][${key}] waiting → ended (20min safety timeout)`);
             evt.phase = "ended";
-            if (!evt.isTest) updateCalibration(evt);
+            if (!evt.isTest) { updateCalibration(evt); reloadCalibration(); }
             evt.history.push({ time, text: "✅ האירוע הסתיים (זמן המתנה מקסימלי)" });
             await updateEventMessage(evt);
             await sendDiscussionUpdate(evt, "ended", `ניתן לצאת מהמרחב המוגן.\nסה"כ ${evt.settlements.size} ישובים, ${evt.waves.length} גלים.`);
@@ -1462,7 +1472,7 @@ async function fetchAlerts() {
           const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
           console.log(`[lifecycle][${key}] early_warning → cleanup (20min timeout, no alert followed)`);
           evt.phase = "ended";
-          if (!evt.isTest) updateCalibration(evt);
+          if (!evt.isTest) { updateCalibration(evt); reloadCalibration(); }
           evt.history.push({ time, text: "✅ ההתרעה הסתיימה (לא הוסלמה לאזעקה)" });
           await updateEventMessage(evt);
           await sendDiscussionUpdate(evt, "ended", `ההתרעה המוקדמת הסתיימה ללא אזעקה.`);
@@ -1515,7 +1525,7 @@ async function fetchAlerts() {
             const time = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
             console.log(`[lifecycle][${key}] → ended (explicit Oref end event)`);
             evt.phase = "ended";
-            if (!evt.isTest) updateCalibration(evt);
+            if (!evt.isTest) { updateCalibration(evt); reloadCalibration(); }
             evt.history.push({ time, text: "✅ האירוע הסתיים (פיקוד העורף)" });
             await updateEventMessage(evt);
             await sendDiscussionUpdate(evt, "ended", `פיקוד העורף הודיע: האירוע הסתיים.\nסה"כ ${evt.settlements.size} ישובים, ${evt.waves.length} גלים.`);
@@ -1632,7 +1642,7 @@ async function fetchAlerts() {
           if (base !== area && REGION_MAP[base]) alertRegions.add(REGION_MAP[base]);
         }
       }
-      evt.riskMsg = formatRiskMessage(alertCoords, alertRegions, allAreas, evt.type);
+      evt.riskMsg = formatRiskMessage(alertCoords, alertRegions, allAreas, evt.type, evt.origin);
 
       console.log(`\n[${time}][${mode}] ${alert.title} [${evt.phase}] ${evt.settlements.size} settlements, ${evt.waves.length} waves`);
 
