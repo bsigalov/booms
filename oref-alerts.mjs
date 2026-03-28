@@ -1331,6 +1331,7 @@ let BOOM_BUTTONS = { inline_keyboard: [[
 
 // Message style: A=minimal, B=clean, C=balanced, D=emoji-rich
 let messageStyle = "B";
+let activeRenderer = "static"; // "static" = staticmaps polygon approximation, "leaflet" = future puppeteer+Leaflet
 
 function buildEventMessageStyleA(evt) {
   const now = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
@@ -2318,6 +2319,16 @@ async function pollTelegramCommands() {
         }
 
         await sendTelegram(statusMsg, TELEGRAM_CHAT_ID);
+      } else if (text?.startsWith("/renderer")) {
+        const arg = text.split(/\s+/)[1]?.toLowerCase();
+        if (arg === "static") {
+          activeRenderer = "static";
+          await sendTelegram("✅ רנדרר: <b>staticmaps</b> (ברירת מחדל)", TELEGRAM_CHAT_ID);
+        } else if (arg === "leaflet") {
+          await sendTelegram("⚠️ רנדרר Leaflet עדיין לא זמין — נשאר ב-staticmaps", TELEGRAM_CHAT_ID);
+        } else {
+          await sendTelegram(`רנדרר נוכחי: <b>${activeRenderer}</b>\nאפשרויות: /renderer static`, TELEGRAM_CHAT_ID);
+        }
       } else if (text?.startsWith("/style")) {
         const arg = text.split(" ")[1]?.toUpperCase();
         if (arg && ["A", "B", "C", "D"].includes(arg)) {
@@ -2348,6 +2359,7 @@ async function pollTelegramCommands() {
           `/stop — עצור סימולציה פעילה\n` +
           `/status — מצב הבוט\n` +
           `/style — שנה סגנון הודעות (A/B/C/D)\n` +
+          `/renderer — שנה רנדרר מפה (static)\n` +
           `/help — הצג תפריט זה`,
           TELEGRAM_CHAT_ID
         );
