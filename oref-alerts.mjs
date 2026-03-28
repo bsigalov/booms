@@ -1115,7 +1115,7 @@ function analyzeRisk(alertCoords, alertRegions, alertSettlements, alertCat, orig
   };
 }
 
-function formatRiskMessage(alertCoords, alertRegions, alertSettlements, alertCat, origin, isDirect = false, prediction = null) {
+function formatRiskMessage(alertCoords, alertRegions, alertSettlements, alertCat, origin, isDirect = false, prediction = null, impact = null, interception = null) {
   // Skip risk analysis for drone attacks (cat=6) — not relevant
   if (String(alertCat) === "6") return "";
   const risk = analyzeRisk(alertCoords, alertRegions, alertSettlements, alertCat, origin);
@@ -1139,13 +1139,23 @@ function formatRiskMessage(alertCoords, alertRegions, alertSettlements, alertCat
     predictionNote = `\nצפי לאזעקה ב-${timeStr} (±${prediction.confidenceMinutes} דק׳, מבוסס על ${prediction.basedOn} אירועים)`;
   }
 
+  const confidenceLabels = { high: "ודאות גבוהה", medium: "ודאות בינונית", low: "ודאות נמוכה" };
+  let impactNote = "";
+  if (interception?.detected && interception.label) {
+    impactNote = `\n🛡️ יירוט זוהה — ${interception.label}`;
+    if (interception.debrisRadiusKm) impactNote += ` | רסיסים ~${Math.round(interception.debrisRadiusKm)} ק״מ`;
+  } else if (impact?.point && impact.label) {
+    impactNote = `\n🎯 נפילה משוערת: ${impact.label} (${confidenceLabels[impact.confidence] || ""}, ±${Math.round(impact.uncertaintyKm)} ק״מ)`;
+  }
+
   // Compact format: threat type, distance, probabilities (all within radius)
   return (
     `\n\n🏠 ${HOME_NAME} | ${risk.closestDist} ק״מ ${risk.dir}${originLabel ? ` | ${originLabel}` : ""} | ${risk.threatType} (יירוט ${risk.interceptRate}%)` +
     `\n${pEmoji(p.alert)} אזעקה ${p.alert}% | נפילה ב-5ק״מ ${p.impact}% | רסיס ב-5ק״מ ${p.debris}% | בום ב-25ק״מ ${p.boom}%` +
     expansionNote +
     directNote +
-    predictionNote
+    predictionNote +
+    impactNote
   );
 }
 
@@ -2319,7 +2329,7 @@ async function fetchAlerts() {
         }
       }
       const prediction = evt.predictedAlarmTime ? { predictedTime: evt.predictedAlarmTime, confidenceMinutes: evt.predictionConfidence, basedOn: evt.predictionBasedOn } : null;
-      evt.riskMsg = formatRiskMessage(alertCoords, alertRegions, allAreas, evt.type, evt.origin, evt.isDirect, prediction);
+      evt.riskMsg = formatRiskMessage(alertCoords, alertRegions, allAreas, evt.type, evt.origin, evt.isDirect, prediction, evt.estimatedImpact, evt.interception);
 
       // Pattern-based EW probability + Iran timing prediction
       if (evt.phase === "early_warning" && evt.ewEllipse) {
