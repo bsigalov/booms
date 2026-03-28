@@ -1837,8 +1837,8 @@ async function fetchAlerts() {
         await sendDiscussionUpdate(evt, "wave", `גל ${evt.waves.length} — ${summarizeAreas(settlements)}`, alert);
       }
 
-      // Map for current wave
-      const mapAreas = [...evt.currentWaveSettlements];
+      // Map for all waves (ellipses need full history, settlements colored per-wave)
+      const mapAreas = [...evt.settlements];
       const mapPath = await generateAlertMap(mapAreas, evt);
       if (mapPath) {
         await sendTelegramPhoto(mapPath, `📍 מפת התרעות - ${time} (${mapAreas.length} ישובים)`, TELEGRAM_CHANNEL_ID, evt);
