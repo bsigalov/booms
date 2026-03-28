@@ -62,6 +62,13 @@ function createEvent(regionKey, title, cat, settlements, time, protectionMin, al
     protectionMin: protectionMin,
     riskMsg: "",
     expansionVector: null,
+    ewSettlements: earlyWarn ? new Set(settlements) : new Set(),
+    ewEllipse: null,
+    ewHull: null,
+    ewAreaKm2: 0,
+    isDirect: false,
+    ewToAlarmSeconds: null,
+    patternClusterId: null,
     lastWaveTime: Date.now(),
     lastTextMessageId: null,
     lastMapMessageId: null,
@@ -592,6 +599,21 @@ function computeWaveEllipse(waveSettlements) {
   const useHull = ellipse.eccentricity < 0.5;
   const hull = useHull ? convexHull(coords) : null;
   return { ellipse, hull, useHull };
+}
+
+function hullAreaKm2(hull) {
+  if (!hull || hull.length < 4) return 0; // need at least 3 points + closing
+  const K_LAT = 111.32;
+  const centroidLat = hull.reduce((s, c) => s + c[1], 0) / hull.length;
+  const K_LNG = 111.32 * Math.cos(centroidLat * Math.PI / 180);
+  // Shoelace formula on projected km coordinates
+  let area = 0;
+  for (let i = 0; i < hull.length - 1; i++) {
+    const x1 = hull[i][0] * K_LNG, y1 = hull[i][1] * K_LAT;
+    const x2 = hull[i + 1][0] * K_LNG, y2 = hull[i + 1][1] * K_LAT;
+    area += x1 * y2 - x2 * y1;
+  }
+  return Math.abs(area) / 2;
 }
 
 // --- Position-in-Ellipse Classification ---
@@ -1764,6 +1786,51 @@ async function fetchAlerts() {
         const isEW = evt.phase === "early_warning";
         console.log(`[lifecycle][${regionKey}] NEW EVENT [${isEW ? "EARLY_WARNING" : "ALERT"}]: "${alert.title}", ${settlements.length} settlements`);
 
+        // Compute initial EW geometry
+        if (evt.phase === "early_warning") {
+          const ewCoords = [...evt.ewSettlements]
+            .map(s => fuzzyMatch(s) || CITY_COORDS[s])
+            .filter(Boolean);
+          if (ewCoords.length >= 3) {
+            evt.ewEllipse = fitEllipse(ewCoords);
+            evt.ewHull = convexHull(ewCoords);
+            evt.ewAreaKm2 = hullAreaKm2(evt.ewHull);
+          }
+        }
+
+        // Detect direct fire: alarm without preceding EW in same/adjacent regions
+        if (evt.phase === "alert") {
+          const evtRegions = new Set();
+          for (const s of settlements) {
+            const r = REGION_MAP[s] || REGION_MAP[s.split(" - ")[0].trim()];
+            if (r) evtRegions.add(r);
+          }
+          let hasRecentEW = false;
+          const fiveMinAgo = Date.now() - 5 * 60000;
+          for (const [, other] of activeEvents) {
+            if (other === evt) continue;
+            if (other.phase === "early_warning" && other.startTime > fiveMinAgo) {
+              const otherRegions = new Set();
+              for (const s of other.settlements) {
+                const r = REGION_MAP[s] || REGION_MAP[s.split(" - ")[0].trim()];
+                if (r) otherRegions.add(r);
+              }
+              for (const r of evtRegions) {
+                if (otherRegions.has(r)) { hasRecentEW = true; break; }
+                for (const adj of (REGION_ADJACENCY[r] || [])) {
+                  if (otherRegions.has(adj)) { hasRecentEW = true; break; }
+                }
+                if (hasRecentEW) break;
+              }
+            }
+            if (hasRecentEW) break;
+          }
+          if (!hasRecentEW) {
+            evt.isDirect = true;
+            console.log(`[lifecycle][${evt.regionKey}] DIRECT FIRE detected (no EW in same/adjacent regions)`);
+          }
+        }
+
         await updateEventMessage(evt);
         await sendDiscussionUpdate(evt, "new", `${isEW ? "התרעה מוקדמת" : "אזעקה"} באזורים: ${summarizeAreas(settlements)}`, alert);
 
@@ -1783,12 +1850,26 @@ async function fetchAlerts() {
       if (wasEarlyWarning && thisIsAlert) {
         console.log(`[lifecycle][${evt.regionKey}] early_warning → alert (real siren)`);
         evt.phase = "alert";
+        evt.ewToAlarmSeconds = Math.round((Date.now() - evt.startTime) / 1000);
       }
       if (evt.phase === "waiting") {
         console.log(`[lifecycle][${evt.regionKey}] waiting → alert (resumed)`);
         evt.phase = "alert";
         resumedFromWaiting = true;
         evt.history.push({ time, text: "🚨 אזעקות חודשו" });
+      }
+
+      // Update EW geometry if this is an early warning update
+      if (isEarlyWarningAlert(alert)) {
+        for (const s of settlements) evt.ewSettlements.add(s);
+        const ewCoords = [...evt.ewSettlements]
+          .map(s => fuzzyMatch(s) || CITY_COORDS[s])
+          .filter(Boolean);
+        if (ewCoords.length >= 3) {
+          evt.ewEllipse = fitEllipse(ewCoords);
+          evt.ewHull = convexHull(ewCoords);
+          evt.ewAreaKm2 = hullAreaKm2(evt.ewHull);
+        }
       }
 
       const waveSettlements = new Set(settlements);
