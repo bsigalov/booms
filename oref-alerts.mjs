@@ -494,6 +494,52 @@ function fitEllipse(coords) {
   return { centroid, semiMajor, semiMinor, azimuthDeg, eccentricity, K_LNG, K_LAT, azimuthRad };
 }
 
+function ellipseToPolygon(ellipse, numPoints = 36) {
+  const { centroid, semiMajor, semiMinor, azimuthRad, K_LNG, K_LAT } = ellipse;
+  if (!K_LNG || !K_LAT) return null;
+  const points = [];
+  for (let i = 0; i < numPoints; i++) {
+    const theta = (2 * Math.PI * i) / numPoints;
+    const x = semiMajor * Math.cos(theta);
+    const y = semiMinor * Math.sin(theta);
+    const xr = x * Math.cos(azimuthRad) - y * Math.sin(azimuthRad);
+    const yr = x * Math.sin(azimuthRad) + y * Math.cos(azimuthRad);
+    points.push([centroid[0] + xr / K_LNG, centroid[1] + yr / K_LAT]);
+  }
+  points.push(points[0]); // close polygon
+  return points;
+}
+
+function convexHull(coords) {
+  if (coords.length <= 2) return coords.length === 2 ? [...coords, coords[0]] : [...coords];
+  // Graham scan — find bottom-most point, sort by polar angle, scan
+  const sorted = [...coords].sort((a, b) => a[1] - b[1] || a[0] - b[0]);
+  const pivot = sorted[0];
+  const rest = sorted.slice(1).sort((a, b) => {
+    const angleA = Math.atan2(a[1] - pivot[1], a[0] - pivot[0]);
+    const angleB = Math.atan2(b[1] - pivot[1], b[0] - pivot[0]);
+    if (Math.abs(angleA - angleB) < 1e-10) {
+      const dA = (a[0] - pivot[0]) ** 2 + (a[1] - pivot[1]) ** 2;
+      const dB = (b[0] - pivot[0]) ** 2 + (b[1] - pivot[1]) ** 2;
+      return dA - dB;
+    }
+    return angleA - angleB;
+  });
+  const hull = [pivot];
+  for (const p of rest) {
+    while (hull.length >= 2) {
+      const a = hull[hull.length - 2];
+      const b = hull[hull.length - 1];
+      const cross = (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+      if (cross <= 0) hull.pop();
+      else break;
+    }
+    hull.push(p);
+  }
+  hull.push(hull[0]); // close polygon
+  return hull;
+}
+
 // --- Position-in-Ellipse Classification ---
 
 function classifyHomePosition(ellipse, homeCoord) {
