@@ -1111,6 +1111,18 @@ async function generateAlertMap(areas, evt = null) {
     }
   };
 
+  // --- EW zone (bottom-most layer) — amber convex hull of early warning area ---
+  if (evt?.ewHull && evt.ewHull.length >= 3) {
+    const ewFill = "#FFC10740"; // yellow/amber at ~25% opacity
+    const ewStroke = "#FF8F0060"; // darker amber at ~37% opacity
+    map.addPolygon({
+      coords: evt.ewHull,
+      color: ewStroke,
+      fill: ewFill,
+      width: 1.5,
+    });
+  }
+
   // --- Ellipse / hull visualization (bottom layer, rendered before settlements) ---
   if (evt && waves.length > 0) {
     const totalWaves = waves.length;
