@@ -665,6 +665,7 @@ function extractPatternFeatures(evt) {
     regions: [...new Set([...evt.settlements].map(s => REGION_MAP[s] || REGION_MAP[s.split(" - ")[0].trim()]).filter(Boolean))],
     settlementCount: evt.settlements.size,
     waveCount: evt.waves.length,
+    origin: evt.origin,
     timestamp: new Date().toISOString(),
   };
 }
@@ -729,6 +730,7 @@ function updatePatternClusters(features) {
       avg_alarmEccentricity: features.alarmEccentricity,
       avg_ewAzimuth: features.ewAzimuth,
       regions: features.regions,
+      origin: features.origin,
       homeAlarmCount: homeAlerted ? 1 : 0,
       pAlarmAtHome: homeAlerted ? 1 : 0,
       lastSeen: features.timestamp,
