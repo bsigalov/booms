@@ -777,6 +777,29 @@ function findMatchingPattern(evt) {
   return null;
 }
 
+function predictAlarmTiming(evt) {
+  if (evt.origin !== "iran" || !evt.ewEllipse) return null;
+  const match = findMatchingPattern(evt);
+  if (!match || match.eventCount < 10) return null;
+
+  const PATTERNS_PATH = `${DATA_DIR}/ew-alarm-patterns.json`;
+  let clusters = [];
+  try { clusters = JSON.parse(readFileSync(PATTERNS_PATH, "utf8")); } catch { return null; }
+  const cluster = clusters.find(c => c.clusterId === match.clusterId);
+  if (!cluster || !cluster.avg_ewToAlarmSeconds) return null;
+
+  const avgSeconds = cluster.avg_ewToAlarmSeconds;
+  const predictedTime = new Date(evt.startTime + avgSeconds * 1000);
+  const confidenceSeconds = Math.max(60, avgSeconds * 0.2);
+
+  return {
+    predictedTime,
+    confidenceMinutes: Math.round(confidenceSeconds / 60),
+    basedOn: match.eventCount,
+    clusterId: match.clusterId,
+  };
+}
+
 // --- Position-in-Ellipse Classification ---
 
 function classifyHomePosition(ellipse, homeCoord) {
@@ -2129,13 +2152,21 @@ async function fetchAlerts() {
       }
       evt.riskMsg = formatRiskMessage(alertCoords, alertRegions, allAreas, evt.type, evt.origin, evt.isDirect);
 
-      // Pattern-based EW probability
+      // Pattern-based EW probability + Iran timing prediction
       if (evt.phase === "early_warning" && evt.ewEllipse) {
         const match = findMatchingPattern(evt);
         if (match) {
           const pct = Math.round(match.pAlarmAtHome * 100);
           evt.riskMsg += `\n📊 לפי ${match.eventCount} אירועים דומים: ${pct}% סיכוי לאזעקה באזורך`;
           evt.patternClusterId = match.clusterId;
+        }
+        if (evt.origin === "iran") {
+          const prediction = predictAlarmTiming(evt);
+          if (prediction) {
+            evt.predictedAlarmTime = prediction.predictedTime;
+            evt.predictionConfidence = prediction.confidenceMinutes;
+            evt.predictionBasedOn = prediction.basedOn;
+          }
         }
       }
 
