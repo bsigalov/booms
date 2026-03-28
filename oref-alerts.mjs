@@ -616,6 +616,104 @@ function hullAreaKm2(hull) {
   return Math.abs(area) / 2;
 }
 
+// --- EW→Alarm Pattern Statistics ---
+
+function extractPatternFeatures(evt) {
+  if (!evt.ewEllipse || evt.waves.length === 0) return null;
+  const alarmEllipse = fitEllipse(
+    [...evt.settlements].map(s => fuzzyMatch(s) || CITY_COORDS[s]).filter(Boolean)
+  );
+  const alarmAreaKm2 = alarmEllipse.semiMajor * alarmEllipse.semiMinor * Math.PI;
+
+  return {
+    ewAreaKm2: evt.ewAreaKm2,
+    ewEccentricity: evt.ewEllipse.eccentricity,
+    ewAxisRatio: evt.ewEllipse.semiMajor / Math.max(0.1, evt.ewEllipse.semiMinor),
+    ewAzimuth: evt.ewEllipse.azimuthDeg,
+    alarmAreaKm2,
+    alarmEccentricity: alarmEllipse.eccentricity,
+    ewAlarmAreaRatio: evt.ewAreaKm2 / Math.max(0.1, alarmAreaKm2),
+    vectorAzimuth: evt.expansionVector?.direction || null,
+    ewToAlarmSeconds: evt.ewToAlarmSeconds,
+    regions: [...new Set([...evt.settlements].map(s => REGION_MAP[s] || REGION_MAP[s.split(" - ")[0].trim()]).filter(Boolean))],
+    settlementCount: evt.settlements.size,
+    waveCount: evt.waves.length,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function patternDistance(a, b) {
+  const weights = {
+    ewAreaKm2: 1.0, ewEccentricity: 1.5, ewAxisRatio: 0.8,
+    ewAzimuth: 1.5, alarmAreaKm2: 1.0, alarmEccentricity: 1.5,
+    ewAlarmAreaRatio: 1.2, ewToAlarmSeconds: 1.0,
+  };
+  let sumSq = 0, count = 0;
+  for (const [key, w] of Object.entries(weights)) {
+    if (a[key] == null || b[key] == null) continue;
+    let diff;
+    if (key === "ewAzimuth") {
+      diff = Math.abs(a[key] - b[key]);
+      diff = Math.min(diff, 360 - diff) / 180;
+    } else {
+      const max = Math.max(Math.abs(a[key]), Math.abs(b[key]), 0.01);
+      diff = Math.abs(a[key] - b[key]) / max;
+    }
+    sumSq += (diff * w) ** 2;
+    count++;
+  }
+  return count > 0 ? Math.sqrt(sumSq / count) : Infinity;
+}
+
+function updatePatternClusters(features) {
+  const PATTERNS_PATH = `${DATA_DIR}/ew-alarm-patterns.json`;
+  let clusters = [];
+  try { clusters = JSON.parse(readFileSync(PATTERNS_PATH, "utf8")); } catch {}
+
+  const THRESHOLD = 0.5;
+  let bestCluster = null, bestDist = Infinity;
+  for (const c of clusters) {
+    const d = patternDistance(features, c);
+    if (d < bestDist) { bestDist = d; bestCluster = c; }
+  }
+
+  if (bestCluster && bestDist < THRESHOLD) {
+    const n = bestCluster.eventCount;
+    for (const key of ["ewAreaKm2", "alarmAreaKm2", "ewToAlarmSeconds", "ewEccentricity", "alarmEccentricity", "ewAzimuth"]) {
+      if (features[key] != null && bestCluster[`avg_${key}`] != null) {
+        bestCluster[`avg_${key}`] = (bestCluster[`avg_${key}`] * n + features[key]) / (n + 1);
+      }
+    }
+    bestCluster.eventCount = n + 1;
+    bestCluster.lastSeen = features.timestamp;
+    const homeAlerted = (features.regions || []).some(r => r === REGION_MAP[HOME_NAME]);
+    bestCluster.homeAlarmCount = (bestCluster.homeAlarmCount || 0) + (homeAlerted ? 1 : 0);
+    bestCluster.pAlarmAtHome = bestCluster.homeAlarmCount / bestCluster.eventCount;
+    console.log(`[patterns] Updated cluster #${clusters.indexOf(bestCluster)} (${bestCluster.eventCount} events, dist=${bestDist.toFixed(2)})`);
+  } else {
+    const homeAlerted = (features.regions || []).some(r => r === REGION_MAP[HOME_NAME]);
+    const newCluster = {
+      clusterId: `c${Date.now()}`,
+      eventCount: 1,
+      avg_ewAreaKm2: features.ewAreaKm2,
+      avg_alarmAreaKm2: features.alarmAreaKm2,
+      avg_ewToAlarmSeconds: features.ewToAlarmSeconds,
+      avg_ewEccentricity: features.ewEccentricity,
+      avg_alarmEccentricity: features.alarmEccentricity,
+      avg_ewAzimuth: features.ewAzimuth,
+      regions: features.regions,
+      homeAlarmCount: homeAlerted ? 1 : 0,
+      pAlarmAtHome: homeAlerted ? 1 : 0,
+      lastSeen: features.timestamp,
+    };
+    clusters.push(newCluster);
+    console.log(`[patterns] New cluster ${newCluster.clusterId} (regions: ${features.regions.join(", ")})`);
+  }
+
+  try { writeFileSync(PATTERNS_PATH, JSON.stringify(clusters, null, 2)); } catch {}
+  return bestCluster?.clusterId || clusters[clusters.length - 1].clusterId;
+}
+
 // --- Position-in-Ellipse Classification ---
 
 function classifyHomePosition(ellipse, homeCoord) {
@@ -1685,6 +1783,8 @@ async function fetchAlerts() {
             console.log(`[lifecycle][${key}] waiting → ended (20min safety timeout)`);
             evt.phase = "ended";
             if (!evt.isTest) { updateCalibration(evt); reloadCalibration(); }
+            const features = extractPatternFeatures(evt);
+            if (features) evt.patternClusterId = updatePatternClusters(features);
             evt.history.push({ time, text: "✅ האירוע הסתיים (זמן המתנה מקסימלי)" });
             await updateEventMessage(evt);
             await sendDiscussionUpdate(evt, "ended", `ניתן לצאת מהמרחב המוגן.\nסה"כ ${evt.settlements.size} ישובים, ${evt.waves.length} גלים.`);
@@ -1698,6 +1798,8 @@ async function fetchAlerts() {
           console.log(`[lifecycle][${key}] early_warning → cleanup (20min timeout, no alert followed)`);
           evt.phase = "ended";
           if (!evt.isTest) { updateCalibration(evt); reloadCalibration(); }
+          const features = extractPatternFeatures(evt);
+          if (features) evt.patternClusterId = updatePatternClusters(features);
           evt.history.push({ time, text: "✅ ההתרעה הסתיימה (לא הוסלמה לאזעקה)" });
           await updateEventMessage(evt);
           await sendDiscussionUpdate(evt, "ended", `ההתרעה המוקדמת הסתיימה ללא אזעקה.`);
@@ -1751,6 +1853,8 @@ async function fetchAlerts() {
             console.log(`[lifecycle][${key}] → ended (explicit Oref end event)`);
             evt.phase = "ended";
             if (!evt.isTest) { updateCalibration(evt); reloadCalibration(); }
+            const features = extractPatternFeatures(evt);
+            if (features) evt.patternClusterId = updatePatternClusters(features);
             evt.history.push({ time, text: "✅ האירוע הסתיים (פיקוד העורף)" });
             await updateEventMessage(evt);
             await sendDiscussionUpdate(evt, "ended", `פיקוד העורף הודיע: האירוע הסתיים.\nסה"כ ${evt.settlements.size} ישובים, ${evt.waves.length} גלים.`);
