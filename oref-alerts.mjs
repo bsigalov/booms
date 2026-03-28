@@ -57,17 +57,11 @@ function createEvent(regionKey, title, cat, settlements, time, protectionMin, al
     type: cat,
     settlements: new Set(settlements),
     currentWaveSettlements: new Set(settlements),
-    waves: earlyWarn ? [] : [(() => {
-      const w = { settlements: new Set(settlements), time };
-      const { ellipse, hull, useHull } = computeWaveEllipse(settlements);
-      w.ellipse = ellipse;
-      w.hull = hull;
-      w.useHull = useHull;
-      return w;
-    })()],
+    waves: earlyWarn ? [] : [{ settlements: new Set(settlements), time, ...computeWaveEllipse(settlements) }],
     history: [{ time, text: `${emoji} ${label}: ${summarizeAreas(settlements)} (${settlements.length})` }],
     protectionMin: protectionMin,
     riskMsg: "",
+    expansionVector: null,
     lastWaveTime: Date.now(),
     lastTextMessageId: null,
     lastMapMessageId: null,
@@ -460,8 +454,8 @@ function projectToLocalKm(coords) {
 
 function fitEllipse(coords) {
   if (coords.length < 3) {
-    const { centroid } = projectToLocalKm(coords);
-    return { centroid, semiMajor: 5, semiMinor: 5, azimuthDeg: 0, eccentricity: 0 };
+    const { centroid, K_LNG, K_LAT } = projectToLocalKm(coords);
+    return { centroid, semiMajor: 5, semiMinor: 5, azimuthDeg: 0, eccentricity: 0, K_LNG, K_LAT, azimuthRad: 0 };
   }
 
   const { centroid, projected, K_LNG, K_LAT } = projectToLocalKm(coords);
@@ -1128,17 +1122,20 @@ async function generateAlertMap(areas, evt = null) {
     });
 
     // Arrowhead: triangle at tip, perpendicular to shaft direction
-    const dx = tip[0] - origin[0];
+    // Correct for longitude compression at Israel's latitude
+    const cosLat = Math.cos((tip[1] + origin[1]) / 2 * Math.PI / 180);
+    const dx = (tip[0] - origin[0]) * cosLat;
     const dy = tip[1] - origin[1];
     const len = Math.sqrt(dx * dx + dy * dy);
     if (len > 0) {
       const headSize = len * 0.15; // 15% of shaft length
-      const ux = dx / len; // unit vector along shaft
+      const ux = dx / len; // unit vector along shaft (in corrected space)
       const uy = dy / len;
       const px = -uy; // perpendicular
       const py = ux;
-      const base1 = [tip[0] - ux * headSize + px * headSize * 0.5, tip[1] - uy * headSize + py * headSize * 0.5];
-      const base2 = [tip[0] - ux * headSize - px * headSize * 0.5, tip[1] - uy * headSize - py * headSize * 0.5];
+      // Convert back to degree-space for coordinates
+      const base1 = [tip[0] - (ux * headSize - px * headSize * 0.5) / cosLat, tip[1] - uy * headSize + py * headSize * 0.5];
+      const base2 = [tip[0] - (ux * headSize + px * headSize * 0.5) / cosLat, tip[1] - uy * headSize - py * headSize * 0.5];
       map.addPolygon({
         coords: [tip, base1, base2, tip],
         color: arrowColor,
@@ -1775,9 +1772,9 @@ async function fetchAlerts() {
           const target = lastEllipse.centroid;
           const magnitude = haversineKm(origin, target);
           const direction = bearing(origin, target);
-          const K = 100;
-          const expVec = [(target[0] - origin[0]) * K, (target[1] - origin[1]) * K];
-          const homeVec = [(HOME_COORD[0] - origin[0]) * K, (HOME_COORD[1] - origin[1]) * K];
+          const cosLat = Math.cos(origin[1] * Math.PI / 180);
+          const expVec = [(target[0] - origin[0]) * cosLat, target[1] - origin[1]];
+          const homeVec = [(HOME_COORD[0] - origin[0]) * cosLat, HOME_COORD[1] - origin[1]];
           const dot = expVec[0] * homeVec[0] + expVec[1] * homeVec[1];
           const expLen = Math.sqrt(expVec[0] ** 2 + expVec[1] ** 2);
           const homeLen = Math.sqrt(homeVec[0] ** 2 + homeVec[1] ** 2);
