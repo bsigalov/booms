@@ -1161,11 +1161,29 @@ const HOME_SVG = `<svg width="18" height="18" xmlns="http://www.w3.org/2000/svg"
 </svg>`;
 const HOME_MARKER_PATH = "/tmp/oref-home-marker.png";
 
+// Impact crosshair marker (red ⊕)
+const IMPACT_SVG = `<svg width="20" height="20" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="10" cy="10" r="8" fill="none" stroke="#F44336" stroke-width="2"/>
+  <line x1="10" y1="2" x2="10" y2="18" stroke="#F44336" stroke-width="2"/>
+  <line x1="2" y1="10" x2="18" y2="10" stroke="#F44336" stroke-width="2"/>
+</svg>`;
+const IMPACT_MARKER_PATH = "/tmp/oref-impact-marker.png";
+
+// Interception crosshair marker (green ⊕)
+const INTERCEPT_SVG = `<svg width="20" height="20" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="10" cy="10" r="8" fill="none" stroke="#4CAF50" stroke-width="2"/>
+  <line x1="10" y1="2" x2="10" y2="18" stroke="#4CAF50" stroke-width="2"/>
+  <line x1="2" y1="10" x2="18" y2="10" stroke="#4CAF50" stroke-width="2"/>
+</svg>`;
+const INTERCEPT_MARKER_PATH = "/tmp/oref-intercept-marker.png";
+
 import sharp from "sharp";
 
 async function ensureMarkers() {
   try { await sharp(Buffer.from(DOT_SVG)).png().toFile(DOT_MARKER_PATH); } catch {}
   try { await sharp(Buffer.from(HOME_SVG)).png().toFile(HOME_MARKER_PATH); } catch {}
+  try { await sharp(Buffer.from(IMPACT_SVG)).png().toFile(IMPACT_MARKER_PATH); } catch {}
+  try { await sharp(Buffer.from(INTERCEPT_SVG)).png().toFile(INTERCEPT_MARKER_PATH); } catch {}
 }
 
 // Resolve areas to coordinates
@@ -1457,6 +1475,30 @@ async function generateAlertMap(areas, evt = null) {
     }
   }
 
+  // --- Debris zone (green dashed circle) --- if interception detected
+  if (evt?.interception?.detected && evt.interception.point) {
+    const ic = evt.interception;
+    map.addCircle({
+      coord: ic.point,
+      radius: ic.debrisRadiusKm * 1000, // km to meters
+      color: "#4CAF50",
+      fill: "#4CAF5033", // 20% opacity
+      width: 1.5,
+    });
+  }
+
+  // --- Impact uncertainty circle (red) ---
+  if (evt?.estimatedImpact?.point) {
+    const impact = evt.estimatedImpact;
+    map.addCircle({
+      coord: impact.point,
+      radius: impact.uncertaintyKm * 1000, // km to meters
+      color: "#F44336",
+      fill: "#F4433650", // ~30% opacity
+      width: 1.5,
+    });
+  }
+
   // --- Expansion vector arrow ---
   if (evt?.expansionVector && evt.expansionVector.magnitude > 0.5) {
     const { origin, target, towardHome, magnitude } = evt.expansionVector;
@@ -1505,6 +1547,30 @@ async function generateAlertMap(areas, evt = null) {
         width: 1,
       });
     }
+  }
+
+  // --- Interception crosshair (green ⊕) ---
+  if (evt?.interception?.detected && evt.interception.point) {
+    map.addMarker({
+      coord: evt.interception.point,
+      img: INTERCEPT_MARKER_PATH,
+      height: 20,
+      width: 20,
+      offsetX: 10,
+      offsetY: 10,
+    });
+  }
+
+  // --- Impact crosshair (red ⊕) ---
+  if (evt?.estimatedImpact?.point) {
+    map.addMarker({
+      coord: evt.estimatedImpact.point,
+      img: IMPACT_MARKER_PATH,
+      height: 20,
+      width: 20,
+      offsetX: 10,
+      offsetY: 10,
+    });
   }
 
   // Add home marker (blue dot) only if within 80km of alert area
