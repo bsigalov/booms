@@ -302,6 +302,45 @@ try {
   console.error("שגיאה בטעינת אזורים:", e.message);
 }
 
+// Compute region adjacency: two regions are neighbors if any settlements within 15km
+const REGION_ADJACENCY = {};
+{
+  const regionSettlements = {};
+  try {
+    const regionsData = JSON.parse(readFileSync(new URL("./oref-regions-official.json", import.meta.url), "utf8"));
+    for (const [region, settlements] of Object.entries(regionsData.regions)) {
+      regionSettlements[region] = settlements
+        .map(s => ({ name: s, coord: CITY_COORDS[s] }))
+        .filter(s => s.coord);
+    }
+  } catch {}
+
+  const regionNames = Object.keys(regionSettlements);
+  for (const r of regionNames) REGION_ADJACENCY[r] = new Set();
+
+  for (let i = 0; i < regionNames.length; i++) {
+    for (let j = i + 1; j < regionNames.length; j++) {
+      const rA = regionNames[i], rB = regionNames[j];
+      let adjacent = false;
+      for (const sA of regionSettlements[rA]) {
+        if (adjacent) break;
+        for (const sB of regionSettlements[rB]) {
+          if (haversineKm(sA.coord, sB.coord) < 15) {
+            adjacent = true;
+            break;
+          }
+        }
+      }
+      if (adjacent) {
+        REGION_ADJACENCY[rA].add(rB);
+        REGION_ADJACENCY[rB].add(rA);
+      }
+    }
+  }
+  const totalPairs = Object.values(REGION_ADJACENCY).reduce((s, v) => s + v.size, 0) / 2;
+  console.log(`[adjacency] ${totalPairs} adjacent region pairs from ${regionNames.length} regions`);
+}
+
 function summarizeAreas(areas) {
   const regions = new Set();
   const majors = [];
