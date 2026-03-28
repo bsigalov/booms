@@ -906,6 +906,11 @@ function clusterSettlements(areas) {
   return clusters;
 }
 
+function waveOpacityHex(waveIndex, totalWaves, baseOpacity = 0x80) {
+  const alpha = Math.round(baseOpacity / (totalWaves - waveIndex));
+  return alpha.toString(16).padStart(2, "0");
+}
+
 // Generate map with polygon areas for large settlements and dots for small ones
 async function generateAlertMap(areas, evt = null) {
   await ensureMarkers();
@@ -1051,6 +1056,38 @@ async function generateAlertMap(areas, evt = null) {
     }
   };
 
+  // --- Ellipse / hull visualization (bottom layer, rendered before settlements) ---
+  if (evt && waves.length > 0) {
+    const totalWaves = waves.length;
+    for (let i = 0; i < totalWaves; i++) {
+      const wave = waves[i];
+      if (!wave.ellipse && !wave.hull) continue;
+
+      const waveColor = WAVE_COLORS.waves[Math.min(i, WAVE_COLORS.waves.length - 1)];
+      const alphaHex = waveOpacityHex(i, totalWaves);
+      // Extract RGB from stroke color (e.g. "#B71C1C" → "B71C1C")
+      const rgb = waveColor.stroke.replace("#", "");
+      const fillColor = `#${rgb}${alphaHex}`;
+      const strokeColor = `#${rgb}60`; // subtle stroke at ~37% opacity
+
+      let polyCoords;
+      if (wave.useHull && wave.hull) {
+        polyCoords = wave.hull;
+      } else if (wave.ellipse) {
+        polyCoords = ellipseToPolygon(wave.ellipse);
+      }
+
+      if (polyCoords && polyCoords.length >= 3) {
+        map.addPolygon({
+          coords: polyCoords,
+          color: strokeColor,
+          fill: fillColor,
+          width: 1,
+        });
+      }
+    }
+  }
+
   // Render early warning settlements (orange) — always orange regardless of current phase
   for (const area of earlyWarningSettlements) {
     renderSettlement(area, WAVE_COLORS.early_warning);
@@ -1061,6 +1098,53 @@ async function generateAlertMap(areas, evt = null) {
     const colors = WAVE_COLORS.waves[Math.min(i, WAVE_COLORS.waves.length - 1)];
     for (const area of waveGroups[i]) {
       renderSettlement(area, colors);
+    }
+  }
+
+  // --- Expansion vector arrow ---
+  if (evt?.expansionVector && evt.expansionVector.magnitude > 0.5) {
+    const { origin, target, towardHome, magnitude } = evt.expansionVector;
+    const useHull = evt.waves[evt.waves.length - 1]?.useHull;
+
+    // Arrow color: red if toward home, orange otherwise
+    const arrowColor = towardHome ? "#F44336" : "#FF9800";
+
+    // Extend arrow beyond target proportional to magnitude (capped at 30km visual)
+    const latestEllipse = evt.waves[evt.waves.length - 1]?.ellipse;
+    const extendKm = useHull
+      ? Math.min(magnitude * 0.5, 15) // hull mode: 50% cap
+      : Math.min((latestEllipse?.semiMajor || 10) * 1.5, 30);
+    const totalDist = haversineKm(origin, target);
+    const scale = totalDist > 0 ? (totalDist + extendKm) / totalDist : 1;
+    const tipLng = origin[0] + (target[0] - origin[0]) * scale;
+    const tipLat = origin[1] + (target[1] - origin[1]) * scale;
+    const tip = [tipLng, tipLat];
+
+    // Arrow shaft
+    map.addLine({
+      coords: [origin, tip],
+      color: arrowColor,
+      width: 3,
+    });
+
+    // Arrowhead: triangle at tip, perpendicular to shaft direction
+    const dx = tip[0] - origin[0];
+    const dy = tip[1] - origin[1];
+    const len = Math.sqrt(dx * dx + dy * dy);
+    if (len > 0) {
+      const headSize = len * 0.15; // 15% of shaft length
+      const ux = dx / len; // unit vector along shaft
+      const uy = dy / len;
+      const px = -uy; // perpendicular
+      const py = ux;
+      const base1 = [tip[0] - ux * headSize + px * headSize * 0.5, tip[1] - uy * headSize + py * headSize * 0.5];
+      const base2 = [tip[0] - ux * headSize - px * headSize * 0.5, tip[1] - uy * headSize - py * headSize * 0.5];
+      map.addPolygon({
+        coords: [tip, base1, base2, tip],
+        color: arrowColor,
+        fill: arrowColor,
+        width: 1,
+      });
     }
   }
 
