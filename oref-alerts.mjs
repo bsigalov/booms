@@ -357,6 +357,21 @@ const REGION_ADJACENCY = {};
 
 const GAZA_REGIONS = new Set(["עוטף עזה", "מערב הנגב", "שדות נגב", "שער הנגב", "אשקלון"]);
 
+// 13 simplified macro-regions for message titles
+const MACRO_REGION_MAP = {
+  "גולן צפון": "הגולן", "גולן דרום": "הגולן",
+  "קו העימות": "הגליל העליון", "גליל עליון": "הגליל העליון",
+  "המפרץ": "חיפה והקריות", "הכרמל": "חיפה והקריות",
+  "העמקים": "הגליל התחתון", "מרכז הגליל": "הגליל המערבי", "גליל תחתון": "הגליל התחתון", "בקעת בית שאן": "הגליל התחתון",
+  "ואדי ערה": "שומרון", "מנשה": "שומרון", "שומרון": "שומרון",
+  "שרון": "השרון", "דן": "המרכז", "ירקון": "המרכז",
+  "השפלה": "המרכז", "שפלת יהודה": "הלכיש והשפלה", "לכיש": "הלכיש והשפלה", "מערב לכיש": "הלכיש והשפלה",
+  "ירושלים": "ירושלים",
+  "עוטף עזה": "באר שבע והנגב הצפוני", "מערב הנגב": "באר שבע והנגב הצפוני", "מרכז הנגב": "באר שבע והנגב הצפוני", "דרום הנגב": "באר שבע והנגב הצפוני",
+  "בקעה": "ים המלח", "יהודה": "ים המלח", "ים המלח": "ים המלח",
+  "ערבה": "אילת והערבה", "אילת": "אילת והערבה",
+};
+
 function classifyOrigin(evt) {
   // Iran: massive EW with 100+ settlements
   if (evt.ewSettlements.size >= 100) return "iran";
@@ -406,6 +421,25 @@ function summarizeAreas(areas) {
   if (regionStr) return regionStr;
   if (majorStr) return majorStr;
   return areas.slice(0, 3).join(", ");
+}
+
+function summarizeAreasMacro(areas) {
+  const macroRegions = new Map(); // macro → count of settlements
+  for (const area of areas) {
+    const region = REGION_MAP[area] || REGION_MAP[area.split(" - ")[0].trim()];
+    if (region) {
+      const macro = MACRO_REGION_MAP[region] || region;
+      macroRegions.set(macro, (macroRegions.get(macro) || 0) + 1);
+    }
+  }
+  if (macroRegions.size === 0) return summarizeAreas(areas);
+  // Sort by settlement count (most affected first), take top 2-3
+  const sorted = [...macroRegions.entries()].sort((a, b) => b[1] - a[1]);
+  const top = sorted.slice(0, sorted.length > 3 ? 2 : 3).map(e => e[0]);
+  if (sorted.length > top.length) {
+    return `${top.join(", ")} ועוד`;
+  }
+  return top.join(", ");
 }
 
 // Fallback geocoding via Nominatim
@@ -1770,8 +1804,7 @@ let activeRenderer = "static"; // "static" = staticmaps polygon approximation, "
 
 function buildEventMessageStyleA(evt) {
   const now = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
-  const alertRegions = getAlertRegions(evt);
-  const regionStr = alertRegions.length > 0 ? alertRegions.join(", ") : summarizeAreas([...evt.settlements]);
+  const regionStr = summarizeAreasMacro([...evt.settlements]);
 
   const phaseLabel = { early_warning: "התרעה מוקדמת", alert: "אזעקה", waiting: "המתנה במרחב מוגן", ended: "אירוע הסתיים" }[evt.phase] || "";
   const timeRange = evt.phase === "ended" ? `${evt.startTimeStr}–${now}` : evt.startTimeStr;
@@ -1792,8 +1825,7 @@ function buildEventMessageStyleA(evt) {
 
 function buildEventMessageStyleB(evt) {
   const now = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
-  const alertRegions = getAlertRegions(evt);
-  const regionStr = alertRegions.length > 0 ? alertRegions.join(", ") : summarizeAreas([...evt.settlements]);
+  const regionStr = summarizeAreasMacro([...evt.settlements]);
 
   const phaseMap = { early_warning: "⚠️ התרעה מוקדמת", alert: "🔴 אזעקה", waiting: "🟡 המתנה", ended: "✅ הסתיים" };
   const timeRange = evt.phase === "ended"
@@ -1813,8 +1845,7 @@ function buildEventMessageStyleB(evt) {
 
 function buildEventMessageStyleC(evt) {
   const now = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
-  const alertRegions = getAlertRegions(evt);
-  const regionStr = alertRegions.length > 0 ? alertRegions.join(", ") : summarizeAreas([...evt.settlements]);
+  const regionStr = summarizeAreasMacro([...evt.settlements]);
 
   const phaseMap = { early_warning: "⚠️", alert: "🚨", waiting: "🟡", ended: "✅" };
   const labelMap = { early_warning: "התרעה מוקדמת", alert: "אזעקה", waiting: "שהייה במקלטים", ended: "אירוע הסתיים" };
@@ -1861,13 +1892,11 @@ function getAlertRegions(evt) {
 // Style D: emoji-rich (original)
 function buildEventMessageStyleD(evt) {
   const now = new Date().toLocaleTimeString("he-IL", { timeZone: "Asia/Jerusalem" });
-  const allRegionsSummary = summarizeAreas([...evt.settlements]);
-  const alertRegions = getAlertRegions(evt);
-  const alertRegionStr = alertRegions.length > 0 ? alertRegions.join(", ") : allRegionsSummary;
+  const alertRegionStr = summarizeAreasMacro([...evt.settlements]);
 
   let header, timeLine;
   if (evt.phase === "early_warning") {
-    header = `⚠️ <b>התרעה מוקדמת באזורים:</b> ${allRegionsSummary}`;
+    header = `⚠️ <b>התרעה מוקדמת באזורים:</b> ${alertRegionStr}`;
     timeLine = `⏰ ${evt.startTimeStr}`;
   } else if (evt.phase === "alert") {
     header = `🚨 <b>אזעקה באזורים:</b> ${alertRegionStr}`;
