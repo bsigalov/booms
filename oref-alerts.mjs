@@ -1815,6 +1815,8 @@ function buildEventMessageStyleA(evt) {
     // Compact risk: one line
     msg += `\n\nרחובות: ${evt.riskMsg.replace(/\n/g, " ").replace(/<[^>]+>/g, "").trim().substring(0, 120)}`;
   }
+  const { short: newsShort } = formatNewsForUpdate(evt);
+  if (newsShort) msg += newsShort;
 
   if (evt.history.length > 1 || evt.phase !== "early_warning") {
     const lines = evt.history.map(h => `${h.time} — ${h.text.replace(/[⚠️🚨🟡✅]/g, "").trim()}`).join("\n");
@@ -1835,6 +1837,8 @@ function buildEventMessageStyleB(evt) {
   let msg = `${phaseMap[evt.phase] || ""} <b>${regionStr}</b>\n⏰ ${timeRange} — ${evt.settlements.size} ישובים`;
 
   if (evt.riskMsg) msg += evt.riskMsg;
+  const { short: newsShort } = formatNewsForUpdate(evt);
+  if (newsShort) msg += newsShort;
 
   if (evt.history.length > 1 || evt.phase !== "early_warning") {
     const lines = evt.history.map(h => `${h.time} ${h.text}`).join("\n");
@@ -1856,6 +1860,8 @@ function buildEventMessageStyleC(evt) {
   let msg = `${phaseMap[evt.phase]} <b>${labelMap[evt.phase]} | ${regionStr}</b>\n⏰ ${timeRange} | ${evt.settlements.size} ישובים | ${evt.waves.length} גלים`;
 
   if (evt.riskMsg) msg += evt.riskMsg;
+  const { short: newsShort } = formatNewsForUpdate(evt);
+  if (newsShort) msg += newsShort;
 
   if (evt.history.length > 1 || evt.phase !== "early_warning") {
     const lines = evt.history.map(h => `${h.time} — ${h.text}`).join("\n");
@@ -1912,6 +1918,8 @@ function buildEventMessageStyleD(evt) {
 
   let msg = `${header}\n${timeLine}`;
   if (evt.riskMsg) msg += evt.riskMsg;
+  const { short: newsShort } = formatNewsForUpdate(evt);
+  if (newsShort) msg += newsShort;
 
   if (evt.history.length > 1 || evt.phase !== "early_warning") {
     const lines = evt.history.map(h => `${h.time} — ${h.text}`).join("\n");
@@ -2015,10 +2023,9 @@ async function sendDiscussionUpdate(evt, updateType, details, alert = null) {
   }
 
   if (alert?.data && alert.data.length > 0) {
-    msg += `\n<blockquote>`;
-    msg += `📋 <b>${alert.title}</b>\n`;
-    msg += `${alert.desc}\n\n`;
-    msg += `<b>ישובים (${alert.data.length}):</b>\n`;
+    msg += `\n📋 <b>${alert.title}</b>\n`;
+    msg += `${alert.desc}\n`;
+    msg += `\n<blockquote expandable><b>ישובים (${alert.data.length}):</b>\n`;
     msg += alert.data.join(", ");
     msg += `</blockquote>`;
   }
@@ -2030,6 +2037,10 @@ async function sendDiscussionUpdate(evt, updateType, details, alert = null) {
     msg += `\n📊 סיכום: ${evt.settlements.size} ישובים, ${evt.waves.length} גלים, ${min}:${String(sec).padStart(2, "0")} דקות`;
   }
 
+  // Add news reports if available
+  const { detailed: newsDetailed } = formatNewsForUpdate(evt);
+  if (newsDetailed) msg += newsDetailed;
+
   // Reply to the auto-forwarded message in discussion group (appears as comment on channel post)
   const opts = {};
   if (evt.discussionThreadId) {
@@ -2037,6 +2048,33 @@ async function sendDiscussionUpdate(evt, updateType, details, alert = null) {
   }
   opts.replyMarkup = BOOM_BUTTONS;
   await sendTelegram(msg, TELEGRAM_DISCUSSION_ID, opts);
+}
+
+function formatNewsForUpdate(evt) {
+  if (!evt.newsReports || evt.newsReports.length === 0) return { short: "", detailed: "" };
+
+  let interceptions = 0, impacts = 0, debris = 0, casualties = 0;
+  const details = [];
+
+  for (const r of evt.newsReports) {
+    if (r.category === "interception") { interceptions += r.count; details.push(`🛡️ יירוט${r.location ? ` — ${r.location}` : ""}${r.count > 1 ? ` (${r.count})` : ""}`); }
+    if (r.category === "impact") { impacts += r.count; details.push(`💥 נפילה${r.location ? ` — ${r.location}` : ""}${r.count > 1 ? ` (${r.count})` : ""}`); }
+    if (r.category === "debris") { debris += r.count; details.push(`🔩 רסיסים${r.location ? ` — ${r.location}` : ""}`); }
+    if (r.category === "casualty") { casualties += r.count; details.push(`🚑 ${r.count} פצועים${r.location ? ` — ${r.location}` : ""}`); }
+    if (r.category === "damage") { details.push(`🏚️ נזק${r.location ? ` — ${r.location}` : ""}`); }
+  }
+
+  // Short version for channel post (one line)
+  const parts = [];
+  if (interceptions > 0) parts.push(`${interceptions} יירוטים`);
+  if (impacts > 0) parts.push(`${impacts} נפילות`);
+  if (casualties > 0) parts.push(`${casualties} פצועים`);
+  const short = parts.length > 0 ? `\n📰 ${parts.join(" | ")}` : "";
+
+  // Detailed version for discussion comments
+  const detailed = details.length > 0 ? `\n<blockquote expandable>📰 <b>דיווחים (${details.length}):</b>\n${details.join("\n")}</blockquote>` : "";
+
+  return { short, detailed };
 }
 
 // Poll alerts with multi-event lifecycle
