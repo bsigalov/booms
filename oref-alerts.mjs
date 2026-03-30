@@ -1419,12 +1419,14 @@ async function generateAlertMap(areas, evt = null) {
   const span = Math.max(spanLon, spanLat);
 
   // Zoom: pick level that fits all settlements with margin
+  // For very large events (country-wide), zoom out more to show ellipsoid extending beyond borders
   let zoom;
   if (span < 0.05) zoom = 13;
   else if (span < 0.15) zoom = 12;
   else if (span < 0.4) zoom = 11;
   else if (span < 1.0) zoom = 10;
-  else zoom = 9; // very large events (100+ settlements across Israel)
+  else if (span < 2.5) zoom = 9;
+  else zoom = 8; // country-wide events — show ellipsoid extending toward origin
 
   // Use portrait ratio for tall spans (north-south), landscape for wide
   const isPortrait = spanLat > spanLon * 1.3;
