@@ -372,22 +372,80 @@ const MACRO_REGION_MAP = {
   "ערבה": "אילת והערבה", "אילת": "אילת והערבה",
 };
 
+// Azimuth bounds for fire direction from each origin (degrees, measured from east counterclockwise)
+// These represent the expected major axis direction of the ellipsoid for each origin
+// Iran: NE of Israel, azimuth ~30-60° (missiles come from the northeast)
+// Yemen: SE of Israel, azimuth ~130-170° (missiles/drones come from the southeast)
+// Lebanon: N of Israel, azimuth ~350-20° (rockets come from the north)
+const ORIGIN_AZIMUTH = {
+  iran: { min: 20, max: 70, default: 45 },
+  yemen: { min: 120, max: 170, default: 145 },
+  lebanon: { min: 340, max: 30, default: 5 },    // wraps around 0°
+  gaza: { min: 190, max: 230, default: 210 },
+};
+
+// Yemen-adjacent regions (southern and eastern Israel)
+const YEMEN_REGIONS = new Set(["ערבה", "אילת", "דרום הנגב", "ים המלח", "מרכז הנגב"]);
+
+function correctAzimuthForOrigin(azimuthDeg, origin) {
+  const bounds = ORIGIN_AZIMUTH[origin];
+  if (!bounds) return azimuthDeg;
+
+  // Normalize azimuth to 0-360
+  const az = ((azimuthDeg % 360) + 360) % 360;
+
+  // Check if azimuth is within bounds (handle wraparound for lebanon)
+  if (bounds.min < bounds.max) {
+    // Normal range (no wraparound)
+    if (az >= bounds.min && az <= bounds.max) return azimuthDeg; // already correct
+  } else {
+    // Wraparound range (e.g., 340-30 for lebanon)
+    if (az >= bounds.min || az <= bounds.max) return azimuthDeg; // already correct
+  }
+
+  // Azimuth is outside bounds — clamp to nearest bound
+  let distToMin, distToMax;
+  if (bounds.min < bounds.max) {
+    distToMin = Math.min(Math.abs(az - bounds.min), 360 - Math.abs(az - bounds.min));
+    distToMax = Math.min(Math.abs(az - bounds.max), 360 - Math.abs(az - bounds.max));
+  } else {
+    distToMin = Math.min(Math.abs(az - bounds.min), 360 - Math.abs(az - bounds.min));
+    distToMax = Math.min(Math.abs(az - bounds.max), 360 - Math.abs(az - bounds.max));
+  }
+
+  return distToMin < distToMax ? bounds.min : bounds.max;
+}
+
 function classifyOrigin(evt) {
+  // Check news reports for origin hints
+  if (evt.newsReports) {
+    for (const r of evt.newsReports) {
+      const text = r.text || "";
+      if (text.includes("תימן") || text.includes("חות'י") || text.includes("חות׳י") || text.includes("אנסאר אללה") || text.includes("yemen") || text.includes("houthi")) return "yemen";
+      if (text.includes("איראן") || text.includes("iran")) return "iran";
+    }
+  }
   // Iran: massive EW with 100+ settlements
   if (evt.ewSettlements.size >= 100) return "iran";
-  // Gaza: direct fire in southern regions
+  // Yemen: alarms in southern/eastern regions without EW
   if (evt.isDirect) {
     const regions = new Set();
     for (const s of evt.settlements) {
       const r = REGION_MAP[s] || REGION_MAP[s.split(" - ")[0].trim()];
       if (r) regions.add(r);
     }
+    // Check Yemen regions first (southern/eastern)
+    let hasYemen = false;
+    for (const r of regions) {
+      if (YEMEN_REGIONS.has(r)) { hasYemen = true; break; }
+    }
+    if (hasYemen) return "yemen";
+    // Gaza regions
     for (const r of regions) {
       if (GAZA_REGIONS.has(r)) return "gaza";
     }
     return "lebanon";
   }
-  // EW present but < 100 settlements
   if (evt.ewSettlements.size > 0) return "iran";
   return "unknown";
 }
@@ -662,6 +720,26 @@ function computeWaveEllipse(waveSettlements) {
   const useHull = ellipse.eccentricity < 0.5;
   const hull = useHull ? convexHull(coords) : null;
   return { ellipse, hull, useHull };
+}
+
+function applyAzimuthCorrection(evt) {
+  if (!evt.origin || evt.origin === "unknown") return;
+  for (const wave of evt.waves) {
+    if (wave.ellipse) {
+      const corrected = correctAzimuthForOrigin(wave.ellipse.azimuthDeg, evt.origin);
+      if (corrected !== wave.ellipse.azimuthDeg) {
+        wave.ellipse.azimuthDeg = corrected;
+        wave.ellipse.azimuthRad = corrected * Math.PI / 180;
+      }
+    }
+  }
+  if (evt.ewEllipse) {
+    const corrected = correctAzimuthForOrigin(evt.ewEllipse.azimuthDeg, evt.origin);
+    if (corrected !== evt.ewEllipse.azimuthDeg) {
+      evt.ewEllipse.azimuthDeg = corrected;
+      evt.ewEllipse.azimuthRad = corrected * Math.PI / 180;
+    }
+  }
 }
 
 function hullAreaKm2(hull) {
@@ -1165,7 +1243,7 @@ function formatRiskMessage(alertCoords, alertRegions, alertSettlements, alertCat
 
   const directNote = isDirect ? "\n⚡ ירי ישיר (ללא התרעה מוקדמת)" : "";
 
-  const originLabels = { iran: "ירי מאיראן", lebanon: "ירי מלבנון", gaza: "ירי מעזה" };
+  const originLabels = { iran: "ירי מאיראן", yemen: "ירי מתימן", lebanon: "ירי מלבנון", gaza: "ירי מעזה" };
   const originLabel = originLabels[origin] || "";
   let predictionNote = "";
   if (prediction?.predictedTime) {
@@ -2283,6 +2361,7 @@ async function fetchAlerts() {
 
         // Classify attack origin
         evt.origin = classifyOrigin(evt);
+        applyAzimuthCorrection(evt);
         if (evt.ewEllipse) evt.launchAzimuth = evt.ewEllipse.azimuthDeg;
         if (evt.origin !== "unknown") console.log(`[lifecycle][${evt.regionKey}] origin=${evt.origin}${evt.launchAzimuth ? ` azimuth=${evt.launchAzimuth.toFixed(0)}°` : ""}`);
 
@@ -2307,6 +2386,7 @@ async function fetchAlerts() {
         evt.phase = "alert";
         evt.ewToAlarmSeconds = Math.round((Date.now() - evt.startTime) / 1000);
         evt.origin = classifyOrigin(evt);
+        applyAzimuthCorrection(evt);
         if (evt.ewEllipse) evt.launchAzimuth = evt.ewEllipse.azimuthDeg;
       }
       if (evt.phase === "waiting") {
