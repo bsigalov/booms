@@ -57,7 +57,7 @@ function createEvent(regionKey, title, cat, settlements, time, protectionMin, al
     type: cat,
     settlements: new Set(settlements),
     currentWaveSettlements: new Set(settlements),
-    waves: earlyWarn ? [] : [{ settlements: new Set(settlements), time, ...computeWaveEllipse(settlements) }],
+    waves: earlyWarn ? [] : [{ settlements: new Set(settlements), time, ...(String(cat) === "1" ? computeWaveEllipse(settlements) : { ellipse: null, hull: null, useHull: false }) }],
     history: [{ time, text: `${emoji} ${label}: ${summarizeAreas(settlements)} (${settlements.length})` }],
     protectionMin: protectionMin,
     riskMsg: "",
@@ -2316,8 +2316,8 @@ async function fetchAlerts() {
         const isEW = evt.phase === "early_warning";
         console.log(`[lifecycle][${regionKey}] NEW EVENT [${isEW ? "EARLY_WARNING" : "ALERT"}]: "${alert.title}", ${settlements.length} settlements`);
 
-        // Compute initial EW geometry
-        if (evt.phase === "early_warning") {
+        // Compute initial EW geometry — rockets only
+        if (evt.phase === "early_warning" && String(evt.type) === "1") {
           const ewCoords = [...evt.ewSettlements]
             .map(s => fuzzyMatch(s) || CITY_COORDS[s])
             .filter(Boolean);
@@ -2328,8 +2328,8 @@ async function fetchAlerts() {
           }
         }
 
-        // Detect direct fire: alarm without preceding EW in same/adjacent regions
-        if (evt.phase === "alert") {
+        // Detect direct fire: alarm without preceding EW in same/adjacent regions — rockets only
+        if (String(evt.type) === "1" && evt.phase === "alert") {
           const evtRegions = new Set();
           for (const s of settlements) {
             const r = REGION_MAP[s] || REGION_MAP[s.split(" - ")[0].trim()];
@@ -2361,11 +2361,11 @@ async function fetchAlerts() {
           }
         }
 
-        // Classify attack origin
-        evt.origin = classifyOrigin(evt);
+        // Classify attack origin — rockets only
+        evt.origin = String(evt.type) === "1" ? classifyOrigin(evt) : null;
         applyAzimuthCorrection(evt);
         if (evt.ewEllipse) evt.launchAzimuth = evt.ewEllipse.azimuthDeg;
-        if (evt.origin !== "unknown") console.log(`[lifecycle][${evt.regionKey}] origin=${evt.origin}${evt.launchAzimuth ? ` azimuth=${evt.launchAzimuth.toFixed(0)}°` : ""}`);
+        if (evt.origin && evt.origin !== "unknown") console.log(`[lifecycle][${evt.regionKey}] origin=${evt.origin}${evt.launchAzimuth ? ` azimuth=${evt.launchAzimuth.toFixed(0)}°` : ""}`);
 
         await updateEventMessage(evt);
         await sendDiscussionUpdate(evt, "new", `${isEW ? "התרעה מוקדמת" : "אזעקה"} באזורים: ${summarizeAreas(settlements)}`, alert);
@@ -2387,7 +2387,7 @@ async function fetchAlerts() {
         console.log(`[lifecycle][${evt.regionKey}] early_warning → alert (real siren)`);
         evt.phase = "alert";
         evt.ewToAlarmSeconds = Math.round((Date.now() - evt.startTime) / 1000);
-        evt.origin = classifyOrigin(evt);
+        evt.origin = String(evt.type) === "1" ? classifyOrigin(evt) : null;
         applyAzimuthCorrection(evt);
         if (evt.ewEllipse) evt.launchAzimuth = evt.ewEllipse.azimuthDeg;
       }
@@ -2398,8 +2398,8 @@ async function fetchAlerts() {
         evt.history.push({ time, text: "🚨 אזעקות חודשו" });
       }
 
-      // Update EW geometry if this is an early warning update
-      if (isEarlyWarningAlert(alert)) {
+      // Update EW geometry if this is an early warning update — rockets only
+      if (isEarlyWarningAlert(alert) && String(evt.type) === "1") {
         for (const s of settlements) evt.ewSettlements.add(s);
         const ewCoords = [...evt.ewSettlements]
           .map(s => fuzzyMatch(s) || CITY_COORDS[s])
@@ -2412,8 +2412,9 @@ async function fetchAlerts() {
       }
 
       const waveSettlements = new Set(settlements);
-      const { ellipse: waveEllipse, hull: waveHull, useHull: waveUseHull } = computeWaveEllipse(settlements);
-      evt.waves.push({ settlements: waveSettlements, time, ellipse: waveEllipse, hull: waveHull, useHull: waveUseHull });
+      const isRocket = String(evt.type) === "1";
+      const waveGeo = isRocket ? computeWaveEllipse(settlements) : { ellipse: null, hull: null, useHull: false };
+      evt.waves.push({ settlements: waveSettlements, time, ...waveGeo });
 
       const newSettlements = settlements.filter(s => !evt.settlements.has(s));
       for (const s of settlements) {
@@ -2422,8 +2423,8 @@ async function fetchAlerts() {
       }
       evt.lastWaveTime = Date.now();
 
-      // Compute expansion vector (first wave centroid → latest wave centroid)
-      if (evt.waves.length >= 2) {
+      // Compute expansion vector (first wave centroid → latest wave centroid) — rockets only
+      if (String(evt.type) === "1" && evt.waves.length >= 2) {
         const firstEllipse = evt.waves[0].ellipse;
         const lastEllipse = evt.waves[evt.waves.length - 1].ellipse;
         if (firstEllipse?.centroid && lastEllipse?.centroid) {
@@ -2480,8 +2481,8 @@ async function fetchAlerts() {
       const prediction = evt.predictedAlarmTime ? { predictedTime: evt.predictedAlarmTime, confidenceMinutes: evt.predictionConfidence, basedOn: evt.predictionBasedOn } : null;
       evt.riskMsg = formatRiskMessage(alertCoords, alertRegions, allAreas, evt.type, evt.origin, evt.isDirect, prediction, evt.estimatedImpact, evt.interception);
 
-      // Pattern-based EW probability + Iran timing prediction
-      if (evt.phase === "early_warning" && evt.ewEllipse) {
+      // Pattern-based EW probability + Iran timing prediction — rockets only
+      if (String(evt.type) === "1" && evt.phase === "early_warning" && evt.ewEllipse) {
         const match = findMatchingPattern(evt);
         if (match) {
           const pct = Math.round(match.pAlarmAtHome * 100);
@@ -2498,8 +2499,8 @@ async function fetchAlerts() {
         }
       }
 
-      // Impact estimation + interception detection
-      if (evt.waves.length >= 1 && evt.phase === "alert") {
+      // Impact estimation + interception detection — rockets only
+      if (String(evt.type) === "1" && evt.waves.length >= 1 && evt.phase === "alert") {
         evt.estimatedImpact = estimateImpactPoint(evt);
         evt.interception = detectInterception(evt);
         if (evt.interception?.detected) {
