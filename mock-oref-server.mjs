@@ -20,16 +20,39 @@ const scenario = scenarioIndex >= 0
   : scenarios[Math.floor(Math.random() * scenarios.length)];
 
 const waves = scenario.waves || [];
-const totalSettlements = waves.flat().length;
+const ewWaves = scenario.ew || [];
+const allPhases = [];
+
+// Add EW phases first
+for (const ewAreas of ewWaves) {
+  allPhases.push({
+    areas: ewAreas,
+    cat: "10",
+    title: "בדקות הקרובות צפויות להתקבל התרעות באזורך",
+    desc: "היכנסו למרחב המוגן",
+  });
+}
+
+// Add alarm phases
+for (const waveAreas of waves) {
+  allPhases.push({
+    areas: waveAreas,
+    cat: scenario.cat || "1",
+    title: scenario.title,
+    desc: scenario.desc || "היכנסו למרחב המוגן ושהו בו 10 דקות",
+  });
+}
+
+const totalSettlements = allPhases.reduce((sum, p) => sum + p.areas.length, 0);
 
 // Calculate timing: 5s minimum between waves, total adapts to wave count
 const waveInterval = Math.max(MIN_WAVE_INTERVAL_MS, 8000); // 8s default, 5s minimum
-const waveWindowMs = waves.length > 1 ? waveInterval * (waves.length - 1) : 0;
+const waveWindowMs = allPhases.length > 1 ? waveInterval * (allPhases.length - 1) : 0;
 const totalMs = Math.max(60000, waveWindowMs + 30000); // waves + 30s for waiting/ended
 const alertDuration = Math.round(waveInterval * 0.6); // alert active for 60% of interval
 
-console.log(`[mock] scenario: "${scenario.title}" — ${totalSettlements} settlements, ${waves.length} waves`);
-console.log(`[mock] timing: ${waveInterval/1000}s between waves, ${Math.round(totalMs/1000)}s total`);
+console.log(`[mock] scenario: "${scenario.title}" — ${totalSettlements} settlements, ${ewWaves.length} EW + ${waves.length} waves`);
+console.log(`[mock] timing: ${waveInterval/1000}s between phases, ${Math.round(totalMs/1000)}s total`);
 
 let currentResponse = "";
 
@@ -44,33 +67,31 @@ server.listen(3333, () => {
 });
 
 function scheduleWaves() {
-  waves.forEach((waveAreas, i) => {
+  allPhases.forEach((phase, i) => {
     const delay = i * waveInterval;
 
-    // Show alert
     setTimeout(() => {
       currentResponse = JSON.stringify({
         id: String(Date.now()),
-        cat: "1",
-        title: scenario.title,
-        desc: scenario.desc || "היכנסו למרחב המוגן ושהו בו 10 דקות",
-        data: waveAreas,
+        cat: phase.cat,
+        title: phase.title,
+        desc: phase.desc,
+        data: phase.areas,
       });
-      console.log(`[mock] wave ${i + 1}/${waves.length} (t+${Math.round(delay/1000)}s): ${waveAreas.length} settlements`);
+      const label = phase.cat === "10" ? "EW" : `wave ${i - ewWaves.length + 1}`;
+      console.log(`[mock] ${label} (t+${Math.round(delay/1000)}s): ${phase.areas.length} settlements`);
     }, delay);
 
-    // Clear alert after duration
     setTimeout(() => {
       currentResponse = "";
     }, delay + alertDuration);
   });
 
-  // End event 20s after last wave
-  const endDelay = waveWindowMs + 20000;
+  const endDelay = (allPhases.length > 0 ? (allPhases.length - 1) * waveInterval : 0) + 20000;
   setTimeout(() => {
     currentResponse = JSON.stringify({
       id: String(Date.now()),
-      cat: "1",
+      cat: scenario.cat || "1",
       title: "האירוע הסתיים",
       desc: "",
       data: [],
@@ -78,12 +99,11 @@ function scheduleWaves() {
     console.log(`[mock] end event sent (t+${Math.round(endDelay/1000)}s)`);
   }, endDelay);
 
-  // Clear end event after 5s
   setTimeout(() => {
     currentResponse = "";
   }, endDelay + 5000);
 
-  // Shutdown
+  const totalMs = Math.max(60000, endDelay + 10000);
   setTimeout(() => {
     console.log("[mock] replay complete, shutting down");
     server.close();
