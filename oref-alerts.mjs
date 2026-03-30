@@ -2,6 +2,9 @@ import StaticMaps from "staticmaps";
 import { readFileSync, writeFileSync, appendFileSync, existsSync } from "fs";
 import { fork } from "child_process";
 
+const BUILD_VERSION = "2.0.0";
+const BUILD_TIME = new Date().toISOString();
+
 let ALERT_URL = process.env.ALERT_URL || "https://www.oref.org.il/warningMessages/alert/alerts.json";
 const POLL_INTERVAL = 1000;
 
@@ -2878,6 +2881,60 @@ async function pollTelegramCommands() {
           continue;
         }
 
+        // Command buttons from /help menu
+        if (cbData?.startsWith("cmd_")) {
+          const cmd = cbData.replace("cmd_", "");
+          if (cmd === "test") {
+            await answerCallback(cb.id, "מתחיל סימולציה...");
+            startSimulation();
+          } else if (cmd === "stop") {
+            await answerCallback(cb.id, "עוצר סימולציה...");
+            stopSimulation();
+          } else if (cmd === "style") {
+            await answerCallback(cb.id, "");
+            const current = messageStyle;
+            await sendTelegram(
+              `🎨 <b>בחר סגנון הודעות:</b>\nנוכחי: <b>${current}</b>`,
+              TELEGRAM_CHAT_ID,
+              { replyMarkup: { inline_keyboard: [
+                [
+                  { text: `${current === "A" ? "✓ " : ""}A Minimal`, callback_data: "style_A" },
+                  { text: `${current === "B" ? "✓ " : ""}B Clean`, callback_data: "style_B" },
+                ],
+                [
+                  { text: `${current === "C" ? "✓ " : ""}C Balanced`, callback_data: "style_C" },
+                  { text: `${current === "D" ? "✓ " : ""}D Emoji`, callback_data: "style_D" },
+                ],
+              ] } }
+            );
+          } else if (cmd === "renderer") {
+            await answerCallback(cb.id, "");
+            await sendTelegram(
+              `🗺 <b>בחר רנדרר מפה:</b>\nנוכחי: <b>${activeRenderer}</b>`,
+              TELEGRAM_CHAT_ID,
+              { replyMarkup: { inline_keyboard: [[
+                { text: `${activeRenderer === "static" ? "✓ " : ""}Static`, callback_data: "renderer_static" },
+                { text: "Leaflet (בקרוב)", callback_data: "renderer_leaflet" },
+              ]] } }
+            );
+          } else if (cmd === "status" || cmd === "help") {
+            await answerCallback(cb.id, "שולח...");
+          }
+          continue;
+        }
+
+        // Renderer buttons
+        if (cbData?.startsWith("renderer_")) {
+          const renderer = cbData.replace("renderer_", "");
+          if (renderer === "static") {
+            activeRenderer = "static";
+            await answerCallback(cb.id, "רנדרר: staticmaps");
+          } else {
+            await answerCallback(cb.id, "Leaflet עדיין לא זמין");
+          }
+          continue;
+        }
+
         // "שמעתי בום!" button from channel → start questionnaire in private chat
         if (cbData === "fb_boom_start") {
           await answerCallback(cb.id, "💥 עובר לצ'אט פרטי...");
@@ -2973,7 +3030,8 @@ async function pollTelegramCommands() {
         const boundaryCount = Object.keys(SETTLEMENT_BOUNDARIES).length;
         const scenarioCount = TEST_SCENARIOS.length;
 
-        let statusMsg = `✅ <b>הבוט פעיל</b>\n\n`;
+        let statusMsg = `✅ <b>הבוט פעיל</b> v${BUILD_VERSION}\n`;
+        statusMsg += `🔨 נבנה: ${new Date(BUILD_TIME).toLocaleString("he-IL", { timeZone: "Asia/Jerusalem" })}\n\n`;
         statusMsg += `<b>מערכת:</b>\n`;
         statusMsg += `⏱ זמן ריצה: ${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}\n`;
         statusMsg += `💾 זיכרון: ${memMB} MB\n`;
@@ -3012,10 +3070,15 @@ async function pollTelegramCommands() {
         if (arg === "static") {
           activeRenderer = "static";
           await sendTelegram("✅ רנדרר: <b>staticmaps</b> (ברירת מחדל)", TELEGRAM_CHAT_ID);
-        } else if (arg === "leaflet") {
-          await sendTelegram("⚠️ רנדרר Leaflet עדיין לא זמין — נשאר ב-staticmaps", TELEGRAM_CHAT_ID);
         } else {
-          await sendTelegram(`רנדרר נוכחי: <b>${activeRenderer}</b>\nאפשרויות: /renderer static`, TELEGRAM_CHAT_ID);
+          await sendTelegram(
+            `🗺 <b>בחר רנדרר מפה:</b>\nנוכחי: <b>${activeRenderer}</b>`,
+            TELEGRAM_CHAT_ID,
+            { replyMarkup: { inline_keyboard: [[
+              { text: `${activeRenderer === "static" ? "✓ " : ""}Static`, callback_data: "renderer_static" },
+              { text: "Leaflet (בקרוב)", callback_data: "renderer_leaflet" },
+            ]] } }
+          );
         }
       } else if (text?.startsWith("/style")) {
         const arg = text.split(" ")[1]?.toUpperCase();
@@ -3042,14 +3105,22 @@ async function pollTelegramCommands() {
         }
       } else if (text === "/help") {
         await sendTelegram(
-          `📋 <b>פקודות זמינות:</b>\n\n` +
-          `/test — סימולציה של אירוע אמיתי\n` +
-          `/stop — עצור סימולציה פעילה\n` +
-          `/status — מצב הבוט\n` +
-          `/style — שנה סגנון הודעות (A/B/C/D)\n` +
-          `/renderer — שנה רנדרר מפה (static)\n` +
-          `/help — הצג תפריט זה`,
-          TELEGRAM_CHAT_ID
+          `📋 <b>פקודות זמינות:</b>`,
+          TELEGRAM_CHAT_ID,
+          { replyMarkup: { inline_keyboard: [
+            [
+              { text: "🧪 סימולציה", callback_data: "cmd_test" },
+              { text: "⛔ עצור סימולציה", callback_data: "cmd_stop" },
+            ],
+            [
+              { text: "📊 סטטוס", callback_data: "cmd_status" },
+              { text: "🎨 סגנון", callback_data: "cmd_style" },
+            ],
+            [
+              { text: "🗺 רנדרר", callback_data: "cmd_renderer" },
+              { text: "❓ עזרה", callback_data: "cmd_help" },
+            ],
+          ] } }
         );
       }
     }
